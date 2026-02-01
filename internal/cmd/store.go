@@ -5,17 +5,23 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"time"
 
 	"github.com/spf13/cobra"
 
 	"github.com/repomind/repomind-go/internal/analyzer"
 	"github.com/repomind/repomind-go/internal/git"
+	"github.com/repomind/repomind-go/internal/monitor"
+	"github.com/repomind/repomind-go/internal/store"
+	"github.com/repomind/repomind-go/internal/store/graph"
+	"github.com/repomind/repomind-go/internal/store/vector"
 )
 
 var (
-	repoURL    string
-	repoBranch string
-	repoPath   string
+	repoURL      string
+	repoBranch   string
+	repoPath     string
+	forceRebuild bool
 )
 
 // storeCmd represents the store command
@@ -39,6 +45,7 @@ func init() {
 	storeCmd.Flags().StringVar(&repoURL, "repo", "", "Git 仓库 URL")
 	storeCmd.Flags().StringVar(&repoPath, "path", "", "本地仓库路径")
 	storeCmd.Flags().StringVar(&repoBranch, "branch", "main", "分支名称")
+	storeCmd.Flags().BoolVarP(&forceRebuild, "force", "f", false, "强制重建（删除已有数据后重新构建）")
 }
 
 func runStore(cmd *cobra.Command, args []string) error {
@@ -56,6 +63,31 @@ func runStore(cmd *cobra.Command, args []string) error {
 		// 克隆远程仓库
 		log.Info("准备克隆远程仓库", "url", repoURL, "branch", repoBranch)
 		destPath := filepath.Join(cfg.Paths.TempDir, "repos", filepath.Base(repoURL))
+
+		// 检查目标目录是否已存在
+		if _, err := os.Stat(destPath); err == nil {
+			if forceRebuild {
+				// 强制模式：直接删除已有目录
+				log.Info("检测到已有仓库，强制模式下将删除重建", "path", destPath)
+				if err := os.RemoveAll(destPath); err != nil {
+					return fmt.Errorf("删除已有仓库失败: %w", err)
+				}
+				log.Info("已删除旧仓库")
+			} else {
+				// 非强制模式：询问用户
+				fmt.Printf("仓库已存在于 %s\n是否删除并重新克隆? [y/N]: ", destPath)
+				var response string
+				fmt.Scanln(&response)
+				if response != "y" && response != "Y" {
+					log.Info("用户取消操作")
+					return fmt.Errorf("操作已取消。使用 --force 或 -f 标志强制重建")
+				}
+				if err := os.RemoveAll(destPath); err != nil {
+					return fmt.Errorf("删除已有仓库失败: %w", err)
+				}
+				log.Info("已删除旧仓库")
+			}
+		}
 
 		repo, err := git.Clone(ctx, git.CloneOptions{
 			URL:      repoURL,
@@ -82,6 +114,7 @@ func runStore(cmd *cobra.Command, args []string) error {
 	}
 
 	// 创建分析器并构建索引
+	log.Info("开始构建索引")
 	codeAnalyzer := analyzer.New(targetPath, log)
 	result, err := codeAnalyzer.BuildIndex(ctx)
 	if err != nil {
@@ -116,5 +149,98 @@ func runStore(cmd *cobra.Command, args []string) error {
 		"methods", methodCount,
 	)
 
+	// 初始化存储层
+	log.Info("初始化存储层")
+
+	// 1. 创建 HuggingFace 嵌入器
+	embedder, err := vector.NewHuggingFaceEmbedder(vector.HuggingFaceConfig{
+		APIToken:  cfg.VectorStore.HuggingFace.APIToken,
+		ModelID:   cfg.VectorStore.HuggingFace.ModelID,
+		Dimension: cfg.VectorStore.HuggingFace.Dimension,
+	})
+	if err != nil {
+		return fmt.Errorf("创建嵌入器失败: %w", err)
+	}
+	log.Info("嵌入器初始化完成", "model", cfg.VectorStore.HuggingFace.ModelID)
+
+	// 2. 创建 Qdrant 向量存储
+	vectorStore, err := vector.NewQdrantStore(vector.QdrantConfig{
+		Host:           cfg.VectorStore.Qdrant.Host,
+		Port:           cfg.VectorStore.Qdrant.Port,
+		CollectionName: cfg.VectorStore.Qdrant.CollectionName,
+		VectorDim:      uint64(cfg.VectorStore.HuggingFace.Dimension),
+	})
+	if err != nil {
+		return fmt.Errorf("创建向量存储失败: %w", err)
+	}
+	defer vectorStore.Close()
+	log.Info("向量存储初始化完成", "type", "qdrant")
+
+	// 3. 创建内存图存储
+	graphStore := graph.NewMemoryStore()
+	defer graphStore.Close()
+
+	// 尝试加载已有的图数据
+	graphPath := filepath.Join(cfg.Paths.DataDir, "graph.json")
+	if _, err := os.Stat(graphPath); err == nil {
+		if err := graphStore.LoadFromFile(graphPath); err != nil {
+			log.Warn("加载图数据失败，使用空图", "error", err)
+		} else {
+			log.Info("已加载现有图数据", "path", graphPath)
+		}
+	}
+
+	// 4. 创建统一知识存储
+	knowledgeStore := store.New(store.Config{
+		VectorStore: vectorStore,
+		GraphStore:  graphStore,
+		Embedder:    embedder,
+	})
+	defer knowledgeStore.Close()
+
+	// 5. 启动资源监控器
+	resMonitor, err := monitor.New(2 * time.Second)
+	if err != nil {
+		log.Warn("创建资源监控器失败", "error", err)
+	} else {
+		resMonitor.Start(ctx)
+		defer func() {
+			resMonitor.Stop()
+			// 打印最终统计
+			if finalStats, err := resMonitor.Collect(); err == nil {
+				resMonitor.PrintFinal(finalStats)
+			}
+		}()
+	}
+
+	// 6. 存储实体到知识库
+	log.Info("开始存储实体到知识库", "count", len(result.Entities))
+	if err := knowledgeStore.StoreEntities(ctx, result.Entities); err != nil {
+		return fmt.Errorf("存储实体失败: %w", err)
+	}
+	log.Info("实体存储完成")
+
+	// 7. 保存图数据到文件
+	if err := os.MkdirAll(cfg.Paths.DataDir, 0755); err != nil {
+		return fmt.Errorf("创建数据目录失败: %w", err)
+	}
+	if err := graphStore.SaveToFile(graphPath); err != nil {
+		return fmt.Errorf("保存图数据失败: %w", err)
+	}
+	log.Info("图数据已保存", "path", graphPath)
+
+	// 8. 输出存储统计
+	stats, err := knowledgeStore.Stats(ctx)
+	if err != nil {
+		log.Warn("获取存储统计失败", "error", err)
+	} else {
+		log.Info("存储统计",
+			"vectors", stats.VectorCount,
+			"nodes", stats.NodeCount,
+			"edges", stats.EdgeCount,
+		)
+	}
+
+	log.Info("知识库更新完成")
 	return nil
 }
