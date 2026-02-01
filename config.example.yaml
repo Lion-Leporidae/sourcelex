@@ -1,0 +1,46 @@
+# RepoMind Configuration Example
+# 复制此文件为 config.yaml 并根据需要修改
+
+# 路径配置
+paths:
+  data_dir: "./data"       # 数据存储目录（SQLite、向量等）
+  temp_dir: "./temp"       # 临时文件目录（克隆的仓库）
+
+# Git 配置
+git:
+  clone_depth: 1           # 克隆深度（1 = 浅克隆，节省空间）
+  credentials:             # 可选：私有仓库凭证
+    # github.com: "ghp_xxxx"
+
+# 向量存储配置
+vector_store:
+  type: "chromem"          # 向量存储类型：chromem（本地）, qdrant
+  embedder_type: "huggingface"
+  chunk_size: 512
+  chunk_overlap: 50
+  
+  # HuggingFace 嵌入模型配置
+  huggingface:
+    api_token: "hf_xxxxx"  # 你的 HuggingFace API Token
+    model_id: "sentence-transformers/all-MiniLM-L6-v2"
+    dimension: 384         # 向量维度，需与模型匹配
+  
+  # Qdrant 配置（如果使用 Qdrant）
+  qdrant:
+    host: "localhost"
+    port: 6334
+    collection_name: "code_vectors"
+
+# 图存储配置
+graph_store:
+  type: "sqlite"           # 图存储类型：sqlite, memory
+
+# MCP 服务器配置
+mcp:
+  host: "127.0.0.1"
+  port: 8080
+
+# 日志配置
+logging:
+  level: "info"            # debug, info, warn, error
+  format: "text"           # json, text
