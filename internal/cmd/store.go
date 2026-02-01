@@ -163,32 +163,29 @@ func runStore(cmd *cobra.Command, args []string) error {
 	}
 	log.Info("嵌入器初始化完成", "model", cfg.VectorStore.HuggingFace.ModelID)
 
-	// 2. 创建 Qdrant 向量存储
-	vectorStore, err := vector.NewQdrantStore(vector.QdrantConfig{
-		Host:           cfg.VectorStore.Qdrant.Host,
-		Port:           cfg.VectorStore.Qdrant.Port,
-		CollectionName: cfg.VectorStore.Qdrant.CollectionName,
-		VectorDim:      uint64(cfg.VectorStore.HuggingFace.Dimension),
+	// 2. 创建 chromem-go 向量存储（本地持久化，无需外部服务）
+	vectorPath := filepath.Join(cfg.Paths.DataDir, "vectors")
+	vectorStore, err := vector.NewChromemStore(vector.ChromemConfig{
+		PersistPath:    vectorPath,
+		CollectionName: "code_vectors",
+		VectorDim:      cfg.VectorStore.HuggingFace.Dimension,
 	})
 	if err != nil {
 		return fmt.Errorf("创建向量存储失败: %w", err)
 	}
 	defer vectorStore.Close()
-	log.Info("向量存储初始化完成", "type", "qdrant")
+	log.Info("向量存储初始化完成", "type", "chromem", "path", vectorPath)
 
-	// 3. 创建内存图存储
-	graphStore := graph.NewMemoryStore()
-	defer graphStore.Close()
-
-	// 尝试加载已有的图数据
-	graphPath := filepath.Join(cfg.Paths.DataDir, "graph.json")
-	if _, err := os.Stat(graphPath); err == nil {
-		if err := graphStore.LoadFromFile(graphPath); err != nil {
-			log.Warn("加载图数据失败，使用空图", "error", err)
-		} else {
-			log.Info("已加载现有图数据", "path", graphPath)
-		}
+	// 3. 创建 SQLite 图存储
+	graphPath := filepath.Join(cfg.Paths.DataDir, "graph.db")
+	graphStore, err := graph.NewSQLiteStore(graph.SQLiteConfig{
+		DBPath: graphPath,
+	})
+	if err != nil {
+		return fmt.Errorf("创建图存储失败: %w", err)
 	}
+	defer graphStore.Close()
+	log.Info("图存储初始化完成", "type", "sqlite", "path", graphPath)
 
 	// 4. 创建统一知识存储
 	knowledgeStore := store.New(store.Config{
@@ -220,14 +217,10 @@ func runStore(cmd *cobra.Command, args []string) error {
 	}
 	log.Info("实体存储完成")
 
-	// 7. 保存图数据到文件
+	// 7. 确保数据目录存在
 	if err := os.MkdirAll(cfg.Paths.DataDir, 0755); err != nil {
 		return fmt.Errorf("创建数据目录失败: %w", err)
 	}
-	if err := graphStore.SaveToFile(graphPath); err != nil {
-		return fmt.Errorf("保存图数据失败: %w", err)
-	}
-	log.Info("图数据已保存", "path", graphPath)
 
 	// 8. 输出存储统计
 	stats, err := knowledgeStore.Stats(ctx)

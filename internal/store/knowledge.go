@@ -55,21 +55,49 @@ func New(cfg Config) *KnowledgeStore {
 // StoreEntities 存储实体列表
 // 将 CodeAnalyzer 提取的实体存储到知识库中
 // 流程:
-// 1. 生成实体的嵌入向量
-// 2. 存储到向量数据库
-// 3. 存储到图数据库（节点）
+// 1. 先存储所有实体到图数据库（保证节点一定存储）
+// 2. 再尝试生成嵌入向量并存储到向量数据库
+// 注意: 即使嵌入失败，图节点也会被存储
 func (ks *KnowledgeStore) StoreEntities(ctx context.Context, entities []entity.Entity) error {
 	if len(entities) == 0 {
 		return nil
 	}
 
-	// 1. 为每个实体生成嵌入向量
-	docs := make([]vector.Document, 0, len(entities))
+	// 1. 首先构建并存储所有图节点
+	// 确保无论向量化是否成功，图节点都会被保存
 	nodes := make([]graph.Node, 0, len(entities))
+	for _, e := range entities {
+		nodes = append(nodes, graph.Node{
+			ID:        e.QualifiedName,
+			Name:      e.Name,
+			Type:      graph.NodeType(e.Type),
+			FilePath:  e.FilePath,
+			StartLine: int(e.StartLine),
+			EndLine:   int(e.EndLine),
+			Signature: e.Signature,
+		})
+	}
+
+	// 存储到图数据库
+	if ks.graphStore != nil && len(nodes) > 0 {
+		if err := ks.graphStore.AddNodes(ctx, nodes); err != nil {
+			return fmt.Errorf("存储节点失败: %w", err)
+		}
+	}
+
+	// 2. 尝试为每个实体生成嵌入向量
+	// 如果嵌入失败，跳过该实体的向量存储，但不影响图节点
+	if ks.embedder == nil || ks.vectorStore == nil {
+		// 没有配置嵌入器或向量存储，跳过向量化
+		return nil
+	}
+
+	docs := make([]vector.Document, 0, len(entities))
+	embedFailCount := 0
 
 	for _, e := range entities {
 		// 构建文档内容（用于向量化）
-		// 包含签名和文件路径，增强语义信息
+		// 包含类型、签名和文件路径，增强语义信息
 		content := fmt.Sprintf("%s\n%s\n%s",
 			string(e.Type),
 			e.Signature,
@@ -79,7 +107,8 @@ func (ks *KnowledgeStore) StoreEntities(ctx context.Context, entities []entity.E
 		// 生成嵌入向量
 		vec, err := ks.embedder.Embed(ctx, content)
 		if err != nil {
-			// 跳过无法嵌入的实体
+			// 记录失败但继续处理其他实体
+			embedFailCount++
 			continue
 		}
 
@@ -98,30 +127,12 @@ func (ks *KnowledgeStore) StoreEntities(ctx context.Context, entities []entity.E
 				"signature":  e.Signature,
 			},
 		})
-
-		// 构建图节点
-		nodes = append(nodes, graph.Node{
-			ID:        e.QualifiedName,
-			Name:      e.Name,
-			Type:      graph.NodeType(e.Type),
-			FilePath:  e.FilePath,
-			StartLine: int(e.StartLine),
-			EndLine:   int(e.EndLine),
-			Signature: e.Signature,
-		})
 	}
 
-	// 2. 存储到向量数据库
-	if ks.vectorStore != nil && len(docs) > 0 {
+	// 存储到向量数据库
+	if len(docs) > 0 {
 		if err := ks.vectorStore.Upsert(ctx, docs); err != nil {
 			return fmt.Errorf("存储向量失败: %w", err)
-		}
-	}
-
-	// 3. 存储到图数据库
-	if ks.graphStore != nil && len(nodes) > 0 {
-		if err := ks.graphStore.AddNodes(ctx, nodes); err != nil {
-			return fmt.Errorf("存储节点失败: %w", err)
 		}
 	}
 
