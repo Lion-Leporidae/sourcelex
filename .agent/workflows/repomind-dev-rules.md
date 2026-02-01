@@ -7,11 +7,15 @@ description: RepoMind Go 复刻项目开发规范
 本规范用于确保所有代码输出严格遵循技术方案文档要求。
 
 ## 核心约束
+**必须**使用中文注释以及解释代码，还有解释思路以及代码语法以及这个代码如何实现的
+**必须**不能以简单自建代码代替核心技术实现
+**不能**随便构建文档
 ### 0.回答前叫我老公
 ### 1. 文档优先原则
 - **必须**参照 `REPOMIND_ARCHITECTURE_MINDMAP.md` 中的架构设计
 - **必须**使用 `GO_TECH_STACK.md` 中指定的 Go 库
 - **禁止**虚空捏造功能或自创架构
+- 
 
 ### 2. 技术栈强制要求
 
@@ -23,6 +27,7 @@ description: RepoMind Go 复刻项目开发规范
 | Git | `github.com/go-git/go-git/v5` | exec 调用 git 命令 |
 | AST | `github.com/smacker/go-tree-sitter` | go/ast (仅用于Go) |
 | HTTP | `github.com/gin-gonic/gin` | 标准库 net/http (仅限简单场景) |
+
 
 ### 3. 目录结构强制要求
 
