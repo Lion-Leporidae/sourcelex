@@ -41,6 +41,7 @@ type VectorStoreConfig struct {
 	ChunkSize    int               `mapstructure:"chunk_size"`
 	ChunkOverlap int               `mapstructure:"chunk_overlap"`
 	HuggingFace  HuggingFaceConfig `mapstructure:"huggingface"`
+	Qdrant       QdrantConfig      `mapstructure:"qdrant"`
 }
 
 // HuggingFaceConfig defines HuggingFace API settings
@@ -48,6 +49,13 @@ type HuggingFaceConfig struct {
 	APIToken  string `mapstructure:"api_token"` // HuggingFace API token
 	ModelID   string `mapstructure:"model_id"`  // Model ID for embeddings
 	Dimension int    `mapstructure:"dimension"` // Vector dimension
+}
+
+// QdrantConfig defines Qdrant vector database settings
+type QdrantConfig struct {
+	Host           string `mapstructure:"host"`            // Qdrant server host
+	Port           int    `mapstructure:"port"`            // Qdrant gRPC port
+	CollectionName string `mapstructure:"collection_name"` // Collection name
 }
 
 // GraphStoreConfig defines graph storage settings
