@@ -19,6 +19,11 @@ vector_store:
   embedder_type: huggingface                          # huggingface, openai
   chunk_size: 1024                                    # 代码分块大小
   chunk_overlap: 200                                  # 分块重叠
+  # HuggingFace 配置
+  huggingface:
+    api_token: ""                                     # 从 huggingface.co/settings/tokens 获取
+    model_id: "sentence-transformers/all-MiniLM-L6-v2" # 嵌入模型
+    dimension: 384                                    # 向量维度
 
 # 图存储配置
 graph_store:

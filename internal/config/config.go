@@ -36,10 +36,18 @@ type GitConfig struct {
 
 // VectorStoreConfig defines vector storage settings
 type VectorStoreConfig struct {
-	Type         string `mapstructure:"type"`          // faiss, qdrant, milvus
-	EmbedderType string `mapstructure:"embedder_type"` // huggingface, openai
-	ChunkSize    int    `mapstructure:"chunk_size"`
-	ChunkOverlap int    `mapstructure:"chunk_overlap"`
+	Type         string            `mapstructure:"type"`          // faiss, qdrant, milvus
+	EmbedderType string            `mapstructure:"embedder_type"` // huggingface, openai
+	ChunkSize    int               `mapstructure:"chunk_size"`
+	ChunkOverlap int               `mapstructure:"chunk_overlap"`
+	HuggingFace  HuggingFaceConfig `mapstructure:"huggingface"`
+}
+
+// HuggingFaceConfig defines HuggingFace API settings
+type HuggingFaceConfig struct {
+	APIToken  string `mapstructure:"api_token"` // HuggingFace API token
+	ModelID   string `mapstructure:"model_id"`  // Model ID for embeddings
+	Dimension int    `mapstructure:"dimension"` // Vector dimension
 }
 
 // GraphStoreConfig defines graph storage settings

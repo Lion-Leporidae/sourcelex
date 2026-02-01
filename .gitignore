@@ -1,0 +1,39 @@
+# Binaries / 编译产物
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+repomind
+
+# Test binary
+*.test
+
+# Output of go coverage
+*.out
+coverage.txt
+
+# Dependency directories
+vendor/
+
+# IDE / Editor
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Project specific / 项目特定
+/data/
+/temp/
+*.log
+
+# Config with secrets / 包含敏感信息的配置
+configs/config.local.yaml
+
+# Debug
+__debug_bin*
