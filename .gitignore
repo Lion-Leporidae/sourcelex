@@ -37,3 +37,5 @@ configs/config.local.yaml
 
 # Debug
 __debug_bin*
+
+.agent/*
