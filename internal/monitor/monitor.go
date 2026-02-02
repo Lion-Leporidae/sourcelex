@@ -164,17 +164,14 @@ func (m *ResourceMonitor) Collect() (*Stats, error) {
 
 // printHeader 打印表头
 func (m *ResourceMonitor) printHeader() {
-	fmt.Println()
-	fmt.Println("┏━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 资源监控 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┓")
-	fmt.Printf("┃ %-10s │ %-18s │ %-18s │ %-10s ┃\n",
-		"时间", "系统内存", "进程内存", "CPU")
-	fmt.Println("┠────────────┼────────────────────┼────────────────────┼────────────┨")
+	fmt.Print("\n📊 资源监控: ")
 }
 
-// printStats 打印资源统计（单行，覆盖上一行）
+// printStats 打印资源统计（单行覆盖）
 func (m *ResourceMonitor) printStats(s *Stats) {
 	timeStr := time.Now().Format("15:04:05")
-	fmt.Printf("┃ %-10s │ %6.1f GB / %.1f%% │ %6.1f MB (RSS)    │ %6.1f%%   ┃\n",
+	// 使用 \r 回到行首，覆盖显示
+	fmt.Printf("\r📊 [%s] 系统: %.1fGB/%.0f%% | 进程: %.1fMB | CPU: %.1f%%    ",
 		timeStr,
 		float64(s.SystemMemUsed)/(1024*1024*1024),
 		s.SystemMemPercent,
@@ -185,7 +182,8 @@ func (m *ResourceMonitor) printStats(s *Stats) {
 
 // PrintFinal 打印最终统计
 func (m *ResourceMonitor) PrintFinal(s *Stats) {
-	fmt.Println("┗━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┛")
+	// 换行，结束单行覆盖模式
+	fmt.Println()
 	fmt.Println()
 	fmt.Println("📊 最终资源统计:")
 	fmt.Printf("   系统内存: %.1f GB / %.1f GB (%.1f%% 已用)\n",
