@@ -12,7 +12,9 @@ package store
 import (
 	"context"
 	"fmt"
+	"log"
 
+	"github.com/repomind/repomind-go/internal/analyzer/chunker"
 	"github.com/repomind/repomind-go/internal/analyzer/entity"
 	"github.com/repomind/repomind-go/internal/store/graph"
 	"github.com/repomind/repomind-go/internal/store/vector"
@@ -29,6 +31,12 @@ type KnowledgeStore struct {
 
 	// embedder 文本嵌入器
 	embedder vector.Embedder
+
+	// chunker 符号分块器（用于提取完整代码）
+	chunker *chunker.SymbolChunker
+
+	// repoPath 仓库路径（用于读取代码内容）
+	repoPath string
 }
 
 // Config KnowledgeStore 配置
@@ -41,6 +49,9 @@ type Config struct {
 
 	// Embedder 嵌入器实例
 	Embedder vector.Embedder
+
+	// RepoPath 仓库路径（用于读取代码内容）
+	RepoPath string
 }
 
 // New 创建 KnowledgeStore
@@ -49,22 +60,41 @@ func New(cfg Config) *KnowledgeStore {
 		vectorStore: cfg.VectorStore,
 		graphStore:  cfg.GraphStore,
 		embedder:    cfg.Embedder,
+		chunker:     chunker.NewSymbolChunker(),
+		repoPath:    cfg.RepoPath,
 	}
 }
 
 // StoreEntities 存储实体列表
 // 将 CodeAnalyzer 提取的实体存储到知识库中
 // 流程:
-// 1. 先存储所有实体到图数据库（保证节点一定存储）
-// 2. 再尝试生成嵌入向量并存储到向量数据库
+// 1. 使用 SymbolChunker 将实体转换为代码分块
+// 2. 存储图节点
+// 3. 为每个分块生成嵌入向量并存储
 // 注意: 即使嵌入失败，图节点也会被存储
 func (ks *KnowledgeStore) StoreEntities(ctx context.Context, entities []entity.Entity) error {
 	if len(entities) == 0 {
 		return nil
 	}
 
-	// 1. 首先构建并存储所有图节点
-	// 确保无论向量化是否成功，图节点都会被保存
+	// 1. 使用 SymbolChunker 生成代码分块
+	chunkOpts := chunker.ChunkOptions{
+		RepoPath:       ks.repoPath,
+		MaxChunkSize:   4096,
+		IncludeContext: true,
+	}
+	chunks, _ := ks.chunker.ChunkEntities(ctx, entities, chunkOpts)
+
+	// 构建分块查找表 (entity qualified_name -> chunk)
+	chunkMap := make(map[string]*chunker.CodeChunk)
+	for i := range chunks {
+		ch := &chunks[i]
+		if ch.Entity != nil {
+			chunkMap[ch.Entity.QualifiedName] = ch
+		}
+	}
+
+	// 2. 构建并存储所有图节点
 	nodes := make([]graph.Node, 0, len(entities))
 	for _, e := range entities {
 		nodes = append(nodes, graph.Node{
@@ -85,30 +115,38 @@ func (ks *KnowledgeStore) StoreEntities(ctx context.Context, entities []entity.E
 		}
 	}
 
-	// 2. 尝试为每个实体生成嵌入向量
-	// 如果嵌入失败，跳过该实体的向量存储，但不影响图节点
+	// 3. 尝试为每个实体生成嵌入向量
 	if ks.embedder == nil || ks.vectorStore == nil {
-		// 没有配置嵌入器或向量存储，跳过向量化
 		return nil
 	}
 
 	docs := make([]vector.Document, 0, len(entities))
 	embedFailCount := 0
+	firstError := ""
 
 	for _, e := range entities {
 		// 构建文档内容（用于向量化）
-		// 包含类型、签名和文件路径，增强语义信息
-		content := fmt.Sprintf("%s\n%s\n%s",
-			string(e.Type),
-			e.Signature,
-			e.FilePath,
-		)
+		// 优先使用分块内容（包含完整代码）
+		var content string
+		if ch, ok := chunkMap[e.QualifiedName]; ok && ch.Content != "" {
+			content = chunker.BuildEmbeddingContent(ch)
+		} else {
+			// 回退到简单内容（仅签名）
+			content = fmt.Sprintf("[%s] %s\n%s\n%s",
+				string(e.Type),
+				e.QualifiedName,
+				e.Signature,
+				e.FilePath,
+			)
+		}
 
 		// 生成嵌入向量
 		vec, err := ks.embedder.Embed(ctx, content)
 		if err != nil {
-			// 记录失败但继续处理其他实体
 			embedFailCount++
+			if firstError == "" {
+				firstError = err.Error()
+			}
 			continue
 		}
 
@@ -128,6 +166,12 @@ func (ks *KnowledgeStore) StoreEntities(ctx context.Context, entities []entity.E
 			},
 		})
 	}
+
+	// 打印嵌入结果统计
+	if embedFailCount > 0 {
+		log.Printf("[WARN] 嵌入失败: %d/%d, 首个错误: %s", embedFailCount, len(entities), firstError)
+	}
+	log.Printf("[INFO] 嵌入成功: %d/%d", len(docs), len(entities))
 
 	// 存储到向量数据库
 	if len(docs) > 0 {
