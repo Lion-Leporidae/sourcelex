@@ -10,6 +10,7 @@ import (
 
 	"github.com/repomind/repomind-go/internal/analyzer/entity"
 	"github.com/repomind/repomind-go/internal/analyzer/parser"
+	"github.com/repomind/repomind-go/internal/analyzer/relation"
 	"github.com/repomind/repomind-go/internal/logger"
 )
 
@@ -25,8 +26,10 @@ type Analyzer struct {
 type AnalysisResult struct {
 	RepoPath      string
 	Entities      []entity.Entity
+	Relations     []relation.CallRelation // 调用关系
 	FileCount     int
 	EntityCount   int
+	RelationCount int
 	NewFiles      int
 	ModifiedFiles int
 	SkippedFiles  int
@@ -84,16 +87,22 @@ func (a *Analyzer) BuildIndex(ctx context.Context) (*AnalysisResult, error) {
 		return nil, err
 	}
 
+	// 步骤8: 提取调用关系
+	relations := a.extractRelations(ctx, filesToAnalyze, entities)
+
 	a.log.Info("索引构建完成",
 		"entities", len(entities),
+		"relations", len(relations),
 		"files_analyzed", len(filesToAnalyze),
 	)
 
 	return &AnalysisResult{
 		RepoPath:      a.scanner.repoPath,
 		Entities:      entities,
+		Relations:     relations,
 		FileCount:     scanResult.TotalFiles,
 		EntityCount:   len(entities),
+		RelationCount: len(relations),
 		NewFiles:      len(scanResult.NewFiles),
 		ModifiedFiles: len(scanResult.ModifiedFiles),
 		SkippedFiles:  len(scanResult.UnchangedFiles),
@@ -155,4 +164,67 @@ func (a *Analyzer) analyzeFiles(ctx context.Context, files []string) ([]entity.E
 
 	wg.Wait()
 	return entities, nil
+}
+
+// extractRelations 提取调用关系
+// 使用已提取的实体构建符号表，然后遍历文件提取调用关系
+func (a *Analyzer) extractRelations(ctx context.Context, files []string, entities []entity.Entity) []relation.CallRelation {
+	// 1. 从实体构建符号表
+	symbolTable := relation.BuildSymbolTableFromEntities(entities)
+	a.log.Debug("符号表构建完成", "symbols", symbolTable.Size())
+
+	var (
+		wg        sync.WaitGroup
+		mu        sync.Mutex
+		relations []relation.CallRelation
+	)
+
+	// 创建任务通道
+	jobs := make(chan string, len(files))
+	for _, f := range files {
+		jobs <- f
+	}
+	close(jobs)
+
+	// 启动 worker
+	for i := 0; i < a.workers; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for relPath := range jobs {
+				select {
+				case <-ctx.Done():
+					return
+				default:
+				}
+
+				absPath := filepath.Join(a.scanner.repoPath, relPath)
+				lang := GetLanguage(relPath)
+				if lang == "" {
+					continue
+				}
+
+				// 解析文件 (Tree-sitter)
+				result, err := a.parser.ParseFile(ctx, absPath, lang)
+				if err != nil {
+					continue
+				}
+
+				// 提取调用关系
+				extractor := relation.NewExtractor(result.Content, relPath, lang, symbolTable)
+				fileRelations := extractor.Extract(result.Tree)
+
+				if len(fileRelations) > 0 {
+					mu.Lock()
+					relations = append(relations, fileRelations...)
+					mu.Unlock()
+					a.log.Debug("提取调用关系", "file", relPath, "relations", len(fileRelations))
+				}
+			}
+		}()
+	}
+
+	wg.Wait()
+	a.log.Info("调用关系提取完成", "total_relations", len(relations))
+	return relations
 }
