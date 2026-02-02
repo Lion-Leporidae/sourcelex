@@ -73,6 +73,13 @@ func runStore(cmd *cobra.Command, args []string) error {
 					return fmt.Errorf("删除已有仓库失败: %w", err)
 				}
 				log.Info("已删除旧仓库")
+
+				// 同时删除 data 目录（向量和图数据库）
+				if err := os.RemoveAll(cfg.Paths.DataDir); err != nil {
+					log.Warn("删除数据目录失败", "path", cfg.Paths.DataDir, "error", err)
+				} else {
+					log.Info("已删除旧数据目录", "path", cfg.Paths.DataDir)
+				}
 			} else {
 				// 非强制模式：询问用户
 				fmt.Printf("仓库已存在于 %s\n是否删除并重新克隆? [y/N]: ", destPath)
@@ -192,6 +199,7 @@ func runStore(cmd *cobra.Command, args []string) error {
 		VectorStore: vectorStore,
 		GraphStore:  graphStore,
 		Embedder:    embedder,
+		RepoPath:    targetPath, // 用于分块器读取代码内容
 	})
 	defer knowledgeStore.Close()
 
@@ -216,6 +224,25 @@ func runStore(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("存储实体失败: %w", err)
 	}
 	log.Info("实体存储完成")
+
+	// 7. 存储调用关系
+	if len(result.Relations) > 0 {
+		log.Info("开始存储调用关系", "count", len(result.Relations))
+		// 转换 relation.CallRelation -> store.Relation
+		storeRelations := make([]store.Relation, 0, len(result.Relations))
+		for _, r := range result.Relations {
+			storeRelations = append(storeRelations, store.Relation{
+				SourceID: r.CallerID,
+				TargetID: r.CalleeID,
+				Type:     "calls",
+			})
+		}
+		if err := knowledgeStore.StoreRelations(ctx, storeRelations); err != nil {
+			log.Warn("存储调用关系失败", "error", err)
+		} else {
+			log.Info("调用关系存储完成")
+		}
+	}
 
 	// 7. 确保数据目录存在
 	if err := os.MkdirAll(cfg.Paths.DataDir, 0755); err != nil {
