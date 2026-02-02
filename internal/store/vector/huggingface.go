@@ -8,7 +8,7 @@
 // - Salesforce/codet5-small (代码T5)
 // - BAAI/bge-small-en-v1.5 (高效嵌入)
 //
-// API 端点: https://api-inference.huggingface.co/models/{model_id}
+// API 端点: https://router.huggingface.co/hf-inference/models/{model_id}
 // 需要: HuggingFace API Token (免费注册获取)
 package vector
 
@@ -97,7 +97,7 @@ func NewHuggingFaceEmbedder(cfg HuggingFaceConfig) (*HuggingFaceEmbedder, error)
 	return &HuggingFaceEmbedder{
 		apiToken:  cfg.APIToken,
 		modelID:   cfg.ModelID,
-		baseURL:   "https://api-inference.huggingface.co/models",
+		baseURL:   "https://router.huggingface.co/hf-inference/models",
 		client:    &http.Client{Timeout: cfg.Timeout},
 		dimension: cfg.Dimension,
 	}, nil
@@ -113,8 +113,8 @@ func NewHuggingFaceEmbedder(cfg HuggingFaceConfig) (*HuggingFaceEmbedder, error)
 // API 响应格式（对于 sentence-transformers 模型）:
 // [[0.123, 0.456, ...]] (二维数组，每个输入一个向量)
 func (e *HuggingFaceEmbedder) Embed(ctx context.Context, text string) ([]float32, error) {
-	// 构建请求 URL
-	url := fmt.Sprintf("%s/%s", e.baseURL, e.modelID)
+	// 构建请求 URL - 使用 feature-extraction pipeline
+	url := fmt.Sprintf("%s/%s/pipeline/feature-extraction", e.baseURL, e.modelID)
 
 	// 构建请求体
 	reqBody := map[string]interface{}{
