@@ -19,7 +19,29 @@ type Config struct {
 	VectorStore VectorStoreConfig `mapstructure:"vector_store"`
 	GraphStore  GraphStoreConfig  `mapstructure:"graph_store"`
 	MCP         MCPConfig         `mapstructure:"mcp"`
+	Agent       AgentConfig       `mapstructure:"agent"`
 	Logging     LoggingConfig     `mapstructure:"logging"`
+}
+
+// AgentConfig defines AI agent settings
+type AgentConfig struct {
+	Provider  string          `mapstructure:"provider"`  // openai, anthropic
+	OpenAI    OpenAILLMConfig `mapstructure:"openai"`
+	Anthropic AnthropicLLMConfig `mapstructure:"anthropic"`
+}
+
+// OpenAILLMConfig defines OpenAI / compatible API settings.
+// BaseURL can point to DeepSeek, Ollama, or any OpenAI-compatible endpoint.
+type OpenAILLMConfig struct {
+	APIKey  string `mapstructure:"api_key"`
+	Model   string `mapstructure:"model"`
+	BaseURL string `mapstructure:"base_url"`
+}
+
+// AnthropicLLMConfig defines Anthropic Claude API settings
+type AnthropicLLMConfig struct {
+	APIKey string `mapstructure:"api_key"`
+	Model  string `mapstructure:"model"`
 }
 
 // PathsConfig defines data and temp directories
