@@ -10,10 +10,19 @@ package vector
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"fmt"
 
 	"github.com/qdrant/go-client/qdrant"
 )
+
+// idToUUID converts a string ID to a deterministic UUID v5-like format
+func idToUUID(id string) string {
+	hash := sha256.Sum256([]byte(id))
+	h := hex.EncodeToString(hash[:16])
+	return fmt.Sprintf("%s-%s-%s-%s-%s", h[0:8], h[8:12], h[12:16], h[16:20], h[20:32])
+}
 
 // QdrantStore 是 Qdrant 向量数据库的实现
 // Qdrant 官方 Go SDK: github.com/qdrant/go-client
@@ -137,6 +146,7 @@ func (s *QdrantStore) Upsert(ctx context.Context, docs []Document) error {
 		// 构建 Payload（元数据）
 		payload := make(map[string]*qdrant.Value)
 		payload["content"] = qdrant.NewValueString(doc.Content)
+		payload["_original_id"] = qdrant.NewValueString(doc.ID)
 		for k, v := range doc.Metadata {
 			switch val := v.(type) {
 			case string:
@@ -153,7 +163,7 @@ func (s *QdrantStore) Upsert(ctx context.Context, docs []Document) error {
 		}
 
 		points[i] = &qdrant.PointStruct{
-			Id:      qdrant.NewIDUUID(doc.ID),
+			Id:      qdrant.NewIDUUID(idToUUID(doc.ID)),
 			Vectors: qdrant.NewVectors(doc.Vector...),
 			Payload: payload,
 		}
@@ -229,6 +239,11 @@ func (s *QdrantStore) Search(ctx context.Context, queryVector []float32, opts Se
 			Metadata: make(map[string]interface{}),
 		}
 
+		// 使用原始 ID（如果存在）
+		if origID, ok := r.Payload["_original_id"]; ok {
+			doc.ID = origID.GetStringValue()
+		}
+
 		// 提取 payload
 		for k, v := range r.Payload {
 			if k == "content" {
@@ -265,7 +280,7 @@ func (s *QdrantStore) Delete(ctx context.Context, ids []string) error {
 	// 构建 ID 列表
 	pointIds := make([]*qdrant.PointId, len(ids))
 	for i, id := range ids {
-		pointIds[i] = qdrant.NewIDUUID(id)
+		pointIds[i] = qdrant.NewIDUUID(idToUUID(id))
 	}
 
 	// 执行删除
