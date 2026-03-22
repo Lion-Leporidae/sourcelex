@@ -1,4 +1,4 @@
-module github.com/repomind/repomind-go
+module github.com/Lion-Leporidae/sourcelex
 
 go 1.25.5
 

@@ -15,11 +15,11 @@ import (
 	"sort"
 	"strings"
 
-	"github.com/repomind/repomind-go/internal/analyzer/chunker"
-	"github.com/repomind/repomind-go/internal/analyzer/entity"
-	"github.com/repomind/repomind-go/internal/logger"
-	"github.com/repomind/repomind-go/internal/store/graph"
-	"github.com/repomind/repomind-go/internal/store/vector"
+	"github.com/Lion-Leporidae/sourcelex/internal/analyzer/chunker"
+	"github.com/Lion-Leporidae/sourcelex/internal/analyzer/entity"
+	"github.com/Lion-Leporidae/sourcelex/internal/logger"
+	"github.com/Lion-Leporidae/sourcelex/internal/store/graph"
+	"github.com/Lion-Leporidae/sourcelex/internal/store/vector"
 )
 
 // KnowledgeStore 统一知识存储

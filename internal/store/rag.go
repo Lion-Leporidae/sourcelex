@@ -8,7 +8,7 @@ import (
 	"sort"
 	"strings"
 
-	"github.com/repomind/repomind-go/internal/store/vector"
+	"github.com/Lion-Leporidae/sourcelex/internal/store/vector"
 )
 
 // RAGRequest RAG 检索请求

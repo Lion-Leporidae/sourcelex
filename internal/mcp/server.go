@@ -21,9 +21,9 @@ import (
 
 	"github.com/gin-gonic/gin"
 
-	repogit "github.com/repomind/repomind-go/internal/git"
-	"github.com/repomind/repomind-go/internal/logger"
-	"github.com/repomind/repomind-go/internal/store"
+	repogit "github.com/Lion-Leporidae/sourcelex/internal/git"
+	"github.com/Lion-Leporidae/sourcelex/internal/logger"
+	"github.com/Lion-Leporidae/sourcelex/internal/store"
 )
 
 // Server MCP 服务器

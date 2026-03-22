@@ -1,251 +1,494 @@
-# 🧠 RepoMind Go
+<div align="center">
 
-> 代码知识库系统 - Go 语言实现
+# Sourcelex
 
-RepoMind 是一个智能代码分析和检索系统，提供代码语义搜索、函数调用链分析和 MCP 协议服务。可与 AI 助手（Cursor、Claude）无缝集成。
+**Turn any codebase into a searchable, queryable knowledge base for AI.**
 
-## ✨ 功能特性
+Semantic search, call graph analysis, and MCP protocol — all in a single binary.
 
-- **🔍 语义搜索** - 基于向量嵌入的代码语义检索，用自然语言找代码
-- **🕸️ 调用关系分析** - 函数调用链上下追溯，理解代码依赖
-- **🌳 多语言 AST 解析** - 支持 Python、Go、Java、JavaScript/TypeScript
-- **📡 MCP 协议** - 与 AI 助手（Cursor、Claude）无缝集成
-- **⚡ 增量更新** - 基于文件哈希的智能增量索引
+[![Go](https://img.shields.io/badge/Go-1.25+-00ADD8?style=flat&logo=go&logoColor=white)](https://go.dev/)
+[![License](https://img.shields.io/badge/License-MIT-green.svg)](LICENSE)
+[![MCP](https://img.shields.io/badge/MCP-Protocol-8A2BE2)](https://modelcontextprotocol.io/)
 
-## 🛠️ 技术栈
-
-| 模块 | 技术 |
-|------|------|
-| CLI | [Cobra](https://github.com/spf13/cobra) |
-| 配置 | [Viper](https://github.com/spf13/viper) |
-| 日志 | [Zap](https://github.com/uber-go/zap) |
-| Git | [go-git](https://github.com/go-git/go-git) |
-| AST | [go-tree-sitter](https://github.com/smacker/go-tree-sitter) |
-| 向量存储 | [Qdrant](https://github.com/qdrant/go-client) |
-| 嵌入 | HuggingFace Inference API |
-| HTTP | [Gin](https://github.com/gin-gonic/gin) |
+[Quick Start](#-quick-start) · [Documentation](docs/MANUAL.md) · [API Reference](#-api-reference) · [MCP Integration](#-mcp-integration)
 
 ---
 
-## 📦 安装
+**English** | [中文](README_CN.md)
 
-### 前置要求
+</div>
 
-- Go 1.21+
-- GCC (用于 Tree-sitter CGO)
-  - **Windows**: [MSYS2](https://www.msys2.org/) + MinGW-w64
-  - **macOS**: Xcode Command Line Tools
-  - **Linux**: `build-essential`
+---
 
-### 构建步骤
+## Why Sourcelex?
+
+AI coding assistants are powerful, but they lose context in large codebases. Sourcelex solves this by indexing your repository into a vector + graph knowledge base that AI tools can query in real-time.
+
+```
+You: "How does authentication work in this codebase?"
+
+Sourcelex → vector search → finds authenticate(), verifyPassword(), createSession()
+         → graph traversal → discovers call chain: main → handler → authenticate → verifyPassword
+         → RAG assembly → returns structured context with code, relationships, and file locations
+         → AI assistant → gives you an accurate, grounded answer
+```
+
+**Key differentiators:**
+
+- **Zero external dependencies** — SQLite + chromem-go, no Docker, no database servers
+- **Single binary** — `go build` and you're done
+- **MCP native** — first-class integration with Cursor, Claude Desktop, and any MCP client
+- **Call graph aware** — not just text search; understands function relationships
+- **Incremental** — re-indexing only processes changed files
+
+---
+
+## Features
+
+| | Feature | Description |
+|---|---------|-------------|
+| **Search** | Semantic, hybrid, context-aware | Natural language → code. Vector similarity + keyword reranking |
+| **Call Graph** | Callers, callees, paths, cycles | Full bidirectional call chain traversal with configurable depth |
+| **Multi-Language** | 7 languages | Python, Go, Java, JavaScript, TypeScript, C, C++ via Tree-sitter |
+| **RAG Pipeline** | Context assembly for LLMs | Vector retrieval → graph expansion → file context → reranking → length control |
+| **MCP Protocol** | AI assistant integration | Native SSE/HTTP support for Cursor, Claude Desktop, and custom clients |
+| **AI Agent** | Built-in chat | OpenAI, Anthropic, DeepSeek, Ollama — ask questions about your code |
+| **Git History** | Commits, blame, entity tracking | Who changed this function? When? What else was modified? |
+| **Graph Analysis** | Algorithms | Cycle detection, topological sort, BFS path finding, subgraph extraction |
+
+---
+
+## Quick Start
+
+### Prerequisites
+
+- **Go 1.21+**
+- **GCC** — required for Tree-sitter CGO ([install guide](#gcc-installation))
+- **HuggingFace API Token** — free, get one at [huggingface.co/settings/tokens](https://huggingface.co/settings/tokens)
+
+### Install
 
 ```bash
-# 1. 克隆仓库
-git clone https://github.com/your-username/repomind-go.git
-cd repomind-go
+git clone https://github.com/Lion-Leporidae/sourcelex.git
+cd sourcelex
+go build -o sourcelex ./cmd/sourcelex
+```
 
-# 2. 安装依赖
-go mod tidy
+### Configure
 
-# 3. 构建
-# Windows (PowerShell)
-$env:Path = "C:\msys64\ucrt64\bin;" + $env:Path
-go build -o repomind.exe ./cmd/repomind
+```bash
+cat > config.yaml << 'EOF'
+vector_store:
+  huggingface:
+    api_token: "hf_your_token_here"
+EOF
+```
 
-# Linux/macOS
-go build -o repomind ./cmd/repomind
+### Run
 
-# 4. 验证安装
-./repomind --help
+```bash
+# 1. Index a repository
+./sourcelex store --repo https://github.com/gin-gonic/gin.git --branch master
+
+# 2. Start the server
+./sourcelex serve --port 8000
+
+# 3. Search
+curl -X POST http://localhost:8000/api/v1/search/semantic \
+  -H "Content-Type: application/json" \
+  -d '{"query": "HTTP routing handler", "top_k": 5}'
+```
+
+That's it. Your codebase is now searchable by AI.
+
+---
+
+## How It Works
+
+```
+                        ┌─────────────┐
+                        │  Git Repo   │
+                        └──────┬──────┘
+                               │
+                    ┌──────────▼──────────┐
+                    │   File Scanner      │  hash + mtime change detection
+                    │   (incremental)     │
+                    └──────────┬──────────┘
+                               │
+                    ┌──────────▼──────────┐
+                    │  Tree-sitter AST    │  Python, Go, Java, JS/TS, C, C++
+                    │  Parser             │
+                    └──────────┬──────────┘
+                               │
+                ┌──────────────┼──────────────┐
+                │              │              │
+        ┌───────▼──────┐ ┌────▼─────┐ ┌──────▼───────┐
+        │   Entities   │ │Relations │ │    Chunks    │
+        │  func/class/ │ │ caller → │ │  code blocks │
+        │  method      │ │ callee   │ │  for embed   │
+        └───────┬──────┘ └────┬─────┘ └──────┬───────┘
+                │              │              │
+                │              │     ┌────────▼────────┐
+                │              │     │  HuggingFace    │
+                │              │     │  Embedding API  │
+                │              │     └────────┬────────┘
+                │              │              │
+         ┌──────▼──────┐ ┌────▼─────┐ ┌──────▼───────┐
+         │   SQLite    │ │  SQLite  │ │  chromem-go  │
+         │   (nodes)   │ │  (edges) │ │  (vectors)   │
+         └──────┬──────┘ └────┬─────┘ └──────┬───────┘
+                │              │              │
+                └──────────────┼──────────────┘
+                               │
+                    ┌──────────▼──────────┐
+                    │   MCP Server (Gin)  │  23 API endpoints
+                    │   REST + SSE        │  8 categories
+                    └─────────────────────┘
 ```
 
 ---
 
-## 🚀 快速开始
+## MCP Integration
 
-### 1. 配置 HuggingFace API
+Connect Sourcelex to your AI coding assistant in seconds.
 
-1. 访问 [huggingface.co/settings/tokens](https://huggingface.co/settings/tokens) 获取 API Token
-2. 创建配置文件 `configs/config.yaml`:
+### Cursor
+
+Add to your MCP settings:
+
+```json
+{
+  "mcpServers": {
+    "sourcelex": {
+      "url": "http://localhost:8000/mcp/sse"
+    }
+  }
+}
+```
+
+### Claude Desktop
+
+Add to `claude_desktop_config.json`:
+
+```json
+{
+  "mcpServers": {
+    "sourcelex": {
+      "url": "http://localhost:8000/mcp/sse"
+    }
+  }
+}
+```
+
+Once connected, your AI assistant can search code semantically, trace call chains, query git history, and more — all through the MCP protocol.
+
+---
+
+## API Reference
+
+All endpoints return `{"success": bool, "data": ..., "error": "..."}`.
+
+### Search
+
+| Method | Endpoint | Description |
+|--------|----------|-------------|
+| POST | `/api/v1/search/semantic` | Semantic vector search |
+| POST | `/api/v1/search/hybrid` | Vector + keyword reranking |
+| POST | `/api/v1/search/context` | Search with call graph expansion |
+
+```bash
+curl -X POST http://localhost:8000/api/v1/search/semantic \
+  -H "Content-Type: application/json" \
+  -d '{"query": "database connection", "top_k": 5}'
+```
+
+### Call Graph
+
+| Method | Endpoint | Description |
+|--------|----------|-------------|
+| GET | `/api/v1/callmap/:id?depth=N` | Callers + callees (bidirectional) |
+| GET | `/api/v1/callers/:id?depth=N` | Who calls this function? |
+| GET | `/api/v1/callees/:id?depth=N` | What does this function call? |
+| GET | `/api/v1/callchain/:id?depth=N` | **Compact text format** (95% fewer tokens) |
+| GET | `/api/v1/graph/summary?file=X` | **Full graph as adjacency list** |
+
+### Graph Analysis
+
+| Method | Endpoint | Description |
+|--------|----------|-------------|
+| GET | `/api/v1/graph/function?type=X&file=X` | Complete function graph (nodes + edges) |
+| GET | `/api/v1/graph/subgraph/:id?depth=N` | Local neighborhood |
+| GET | `/api/v1/graph/path?from=X&to=Y` | Shortest call path between functions |
+| GET | `/api/v1/graph/cycles` | Circular dependency detection |
+| GET | `/api/v1/graph/topo-sort` | Topological ordering |
+
+### RAG (Context Assembly for LLMs)
+
+| Method | Endpoint | Description |
+|--------|----------|-------------|
+| POST | `/api/v1/rag/context` | Multi-source context assembly |
+
+```bash
+curl -X POST http://localhost:8000/api/v1/rag/context \
+  -H "Content-Type: application/json" \
+  -d '{
+    "query": "how does auth work",
+    "top_k": 5,
+    "include_call_graph": true,
+    "call_graph_depth": 2,
+    "include_file_context": true,
+    "enable_reranking": true,
+    "max_context_length": 16000
+  }'
+```
+
+The RAG pipeline: **vector retrieval → reranking → call graph expansion → file context → assembly → length control**.
+
+### Git History
+
+| Method | Endpoint | Description |
+|--------|----------|-------------|
+| GET | `/api/v1/history/commits?limit=N&author=X` | Commit history with filters |
+| GET | `/api/v1/history/commit/:hash` | Commit detail with stats |
+| GET | `/api/v1/history/file?path=X` | File change history |
+| GET | `/api/v1/history/blame?path=X` | Line-by-line blame |
+| GET | `/api/v1/history/entity?id=X` | Entity change history |
+
+### Other
+
+| Method | Endpoint | Description |
+|--------|----------|-------------|
+| GET | `/health` | Health check |
+| GET | `/api/v1/workspace` | Index statistics |
+| GET | `/api/v1/entity/:id` | Entity detail |
+| GET | `/mcp/sse` | MCP SSE stream |
+| POST | `/mcp/request` | MCP protocol handler |
+
+> Full API documentation with request/response schemas: [docs/MANUAL.md](docs/MANUAL.md)
+
+---
+
+## Configuration
+
+Sourcelex uses YAML config with environment variable overrides.
+
+**Config file locations** (in priority order):
+1. `--config` flag
+2. `./configs/config.yaml`
+3. `./config.yaml`
+4. `~/.sourcelex/config.yaml`
+
+### Minimal
 
 ```yaml
 vector_store:
   huggingface:
-    api_token: "hf_xxxxxxxxxx"  # 你的 Token
+    api_token: "hf_xxxxx"
+```
+
+### Full
+
+```yaml
+paths:
+  data_dir: "./data"
+  temp_dir: "./temp"
+
+git:
+  clone_depth: 1
+  credentials:
+    # github.com: "ghp_xxxx"
+
+vector_store:
+  type: "chromem"                    # chromem (local) | qdrant (remote)
+  embedder_type: "huggingface"
+  chunk_size: 512
+  chunk_overlap: 50
+  huggingface:
+    api_token: "hf_xxxxx"
     model_id: "sentence-transformers/all-MiniLM-L6-v2"
     dimension: 384
+  qdrant:                            # only if type: "qdrant"
+    host: "localhost"
+    port: 6334
+    collection_name: "code_vectors"
+
+graph_store:
+  type: "sqlite"                     # sqlite | memory
+
+mcp:
+  host: "0.0.0.0"
+  port: 8000
+
+agent:
+  provider: ""                       # openai | anthropic | "" (disabled)
+  openai:
+    api_key: ""
+    model: "gpt-4o"
+    base_url: ""                     # custom endpoint for DeepSeek, Ollama, etc.
+  anthropic:
+    api_key: ""
+    model: "claude-sonnet-4-20250514"
+
+logging:
+  level: "info"
+  format: "text"
 ```
 
-### 2. 索引代码仓库
+### Environment Variables
+
+Override any config with `SOURCELEX_` prefix:
 
 ```bash
-# 索引本地仓库
-./repomind store --path /path/to/your/repo
-
-# 索引远程仓库
-./repomind store --repo https://github.com/user/repo --branch main
-```
-
-### 3. 启动 MCP 服务
-
-```bash
-./repomind serve --port 8000
-```
-
-### 4. 测试 API
-
-```bash
-# 健康检查
-curl http://localhost:8000/health
-
-# 语义搜索
-curl -X POST http://localhost:8000/api/v1/search/semantic \
-  -H "Content-Type: application/json" \
-  -d '{"query": "计算两数之和", "top_k": 5}'
+export SOURCELEX_VECTOR_STORE_HUGGINGFACE_API_TOKEN=hf_xxxxx
+export SOURCELEX_AGENT_OPENAI_API_KEY=sk-xxxxx
+export SOURCELEX_MCP_PORT=9000
 ```
 
 ---
 
-## 📁 项目结构
+## AI Agent
+
+Enable the built-in AI assistant to answer questions about your codebase in natural language.
+
+```yaml
+# OpenAI
+agent:
+  provider: "openai"
+  openai: { api_key: "sk-xxx", model: "gpt-4o" }
+
+# Anthropic
+agent:
+  provider: "anthropic"
+  anthropic: { api_key: "sk-ant-xxx", model: "claude-sonnet-4-20250514" }
+
+# DeepSeek / Ollama / any OpenAI-compatible API
+agent:
+  provider: "openai"
+  openai: { api_key: "sk-xxx", model: "deepseek-chat", base_url: "https://api.deepseek.com/v1" }
+```
+
+The agent automatically calls these tools to answer questions:
+
+| Tool | Description |
+|------|-------------|
+| `semantic_search` | Find code by natural language |
+| `get_entity` | Get function/class details |
+| `get_callers` / `get_callees` | Trace call relationships |
+| `get_subgraph` | Local call neighborhood |
+| `find_path` | Call path between two functions |
+| `detect_cycles` | Find circular dependencies |
+| `get_workspace_stats` | Knowledge base statistics |
+
+Web UI available at `http://localhost:8000` after starting the server.
+
+---
+
+## CLI Reference
+
+```bash
+sourcelex store   --path <dir>                    # Index local repository
+sourcelex store   --repo <url> --branch <branch>  # Index remote repository
+sourcelex store   --path . --force                 # Force full rebuild
+sourcelex serve   --host 0.0.0.0 --port 8000      # Start MCP server
+sourcelex version                                  # Show version info
+```
+
+---
+
+## Project Structure
 
 ```
-repomind-go/
-├── cmd/repomind/          # 程序入口
+sourcelex/
+├── cmd/sourcelex/              # Entry point
 ├── internal/
-│   ├── analyzer/          # 代码分析
-│   │   ├── parser/        # Tree-sitter AST 解析
-│   │   └── entity/        # 实体提取
-│   ├── cmd/               # CLI 命令
-│   ├── config/            # 配置管理
-│   ├── git/               # Git 仓库管理
-│   ├── logger/            # 日志系统
-│   ├── mcp/               # MCP 服务
-│   └── store/             # 存储层
-│       ├── vector/        # 向量存储
-│       └── graph/         # 图存储
-├── configs/               # 配置文件
+│   ├── agent/                 # AI chat agent
+│   │   └── llm/               #   OpenAI / Anthropic providers
+│   ├── analyzer/              # Code analysis engine
+│   │   ├── parser/            #   Tree-sitter AST parsing
+│   │   ├── entity/            #   Entity extraction (func/class/method)
+│   │   ├── relation/          #   Call relationship extraction
+│   │   └── chunker/           #   Code chunking for embeddings
+│   ├── cmd/                   # CLI commands (Cobra)
+│   ├── config/                # Configuration (Viper)
+│   ├── git/                   # Git operations (go-git)
+│   ├── logger/                # Structured logging (Zap)
+│   ├── mcp/                   # MCP server (Gin) — 23 endpoints
+│   ├── monitor/               # Resource monitoring
+│   ├── store/                 # Storage facade
+│   │   ├── vector/            #   chromem-go / Qdrant
+│   │   └── graph/             #   SQLite / memory
+│   └── web/                   # Web UI
+├── configs/                   # Config templates
+├── docs/                      # Documentation
 └── go.mod
 ```
 
 ---
 
-## 🔌 API 参考
+## Tech Stack
 
-### 健康检查
-
-```http
-GET /health
-```
-
-响应:
-```json
-{"status": "ok", "service": "repomind-mcp"}
-```
-
-### 语义搜索
-
-```http
-POST /api/v1/search/semantic
-Content-Type: application/json
-
-{
-  "query": "处理用户登录的函数",
-  "top_k": 10
-}
-```
-
-响应:
-```json
-{
-  "success": true,
-  "data": [
-    {
-      "entity_id": "auth.login",
-      "name": "login",
-      "type": "function",
-      "file_path": "src/auth.py",
-      "score": 0.92
-    }
-  ]
-}
-```
-
-### 获取实体信息
-
-```http
-GET /api/v1/entity/{entity_id}
-```
-
-### 获取调用关系
-
-```http
-GET /api/v1/callmap/{entity_id}?depth=2
-```
-
-响应:
-```json
-{
-  "success": true,
-  "data": {
-    "entity_id": "main.process",
-    "callers": [...],
-    "callees": [...]
-  }
-}
-```
-
-### SSE 连接
-
-```http
-GET /mcp/sse
-```
+| Component | Technology |
+|-----------|-----------|
+| Language | Go 1.25 |
+| CLI | [Cobra](https://github.com/spf13/cobra) |
+| Config | [Viper](https://github.com/spf13/viper) |
+| Logging | [Zap](https://go.uber.org/zap) |
+| HTTP | [Gin](https://github.com/gin-gonic/gin) |
+| Git | [go-git](https://github.com/go-git/go-git) |
+| AST Parsing | [go-tree-sitter](https://github.com/smacker/go-tree-sitter) |
+| Vector Store | [chromem-go](https://github.com/philippgille/chromem-go) (default) / [Qdrant](https://qdrant.tech/) |
+| Graph Store | SQLite (default) / In-memory |
+| Embeddings | [HuggingFace Inference API](https://huggingface.co/inference-api) |
 
 ---
 
-## ⚙️ 配置说明
+## Supported Languages
 
-| 配置项 | 说明 | 默认值 |
-|--------|------|--------|
-| `paths.data_dir` | 数据存储目录 | `./data` |
-| `vector_store.type` | 向量数据库类型 | `qdrant` |
-| `vector_store.huggingface.api_token` | HuggingFace API Token | 必填 |
-| `vector_store.huggingface.model_id` | 嵌入模型 | `all-MiniLM-L6-v2` |
-| `graph_store.type` | 图存储类型 | `memory` |
-| `mcp.host` | 服务监听地址 | `0.0.0.0` |
-| `mcp.port` | 服务监听端口 | `8000` |
-| `logging.level` | 日志级别 | `info` |
-
----
-
-## 📝 CLI 命令
-
-```bash
-# 查看帮助
-./repomind --help
-
-# 索引仓库
-./repomind store --path .          # 本地仓库
-./repomind store --repo <url>       # 远程仓库
-
-# 启动服务
-./repomind serve                   # 默认端口 8000
-./repomind serve --port 9000       # 指定端口
-
-# 查看版本
-./repomind version
-```
+| Language | Extensions | Entity Types |
+|----------|-----------|--------------|
+| Python | `.py` | function, class, method |
+| Go | `.go` | function, struct |
+| Java | `.java` | class, method |
+| JavaScript | `.js` | function |
+| TypeScript | `.ts` | function, class |
+| C | `.c` | function |
+| C++ | `.cpp` `.cc` `.cxx` | class, method |
 
 ---
 
-## 🔧 开发状态
+## GCC Installation
 
-- [x] Phase 1: 基础设施 (CLI, 配置, 日志)
-- [x] Phase 2: 代码分析 (Git, AST, 实体提取)
-- [x] Phase 3: 存储层 (向量存储, 图存储)
-- [x] Phase 4: MCP 服务 (HTTP, SSE, API)
+Tree-sitter requires CGO. Install a C compiler for your platform:
+
+| Platform | Command |
+|----------|---------|
+| macOS | `xcode-select --install` |
+| Ubuntu/Debian | `sudo apt install build-essential` |
+| CentOS/RHEL | `sudo yum install gcc` |
+| Windows | Install [MSYS2](https://www.msys2.org/), then `pacman -S mingw-w64-ucrt-x86_64-gcc` and add `C:\msys64\ucrt64\bin` to PATH |
 
 ---
 
-## 📄 License
+## Contributing
 
-MIT License
+Contributions are welcome! Please:
+
+1. Fork the repository
+2. Create a feature branch (`git checkout -b feature/amazing-feature`)
+3. Commit your changes (`git commit -m 'feat: add amazing feature'`)
+4. Push to the branch (`git push origin feature/amazing-feature`)
+5. Open a Pull Request
+
+---
+
+## License
+
+[MIT](LICENSE)
+
+---
+
+<div align="center">
+
+**[Documentation](docs/MANUAL.md)** · **[Report Bug](https://github.com/Lion-Leporidae/sourcelex/issues)** · **[Request Feature](https://github.com/Lion-Leporidae/sourcelex/issues)**
+
+</div>

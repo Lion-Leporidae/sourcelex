@@ -14,7 +14,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/repomind/repomind-go/internal/logger"
+	"github.com/Lion-Leporidae/sourcelex/internal/logger"
 )
 
 // SupportedLanguages maps file extensions to language names
@@ -52,7 +52,7 @@ func NewFileScanner(repoPath string, log *logger.Logger) *FileScanner {
 	scanner := &FileScanner{
 		repoPath:  repoPath,
 		cache:     make(map[string]FileState),
-		cachePath: filepath.Join(repoPath, ".repomind_cache.json"),
+		cachePath: filepath.Join(repoPath, ".sourcelex_cache.json"),
 		log:       log,
 	}
 	scanner.loadCache()

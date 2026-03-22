@@ -6,11 +6,13 @@ import (
 	"fmt"
 	"net/http"
 	"strconv"
+	"time"
 
 	"github.com/gin-gonic/gin"
 
-	"github.com/repomind/repomind-go/internal/store"
-	"github.com/repomind/repomind-go/internal/store/graph"
+	repogit "github.com/Lion-Leporidae/sourcelex/internal/git"
+	"github.com/Lion-Leporidae/sourcelex/internal/store"
+	"github.com/Lion-Leporidae/sourcelex/internal/store/graph"
 )
 
 // ========== 请求/响应结构体 ==========
@@ -156,7 +158,7 @@ type PathResponse struct {
 func (s *Server) handleHealth(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{
 		"status":  "ok",
-		"service": "repomind-mcp",
+		"service": "sourcelex-mcp",
 	})
 }
 

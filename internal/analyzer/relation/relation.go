@@ -10,7 +10,7 @@ package relation
 import (
 	"strings"
 
-	"github.com/repomind/repomind-go/internal/analyzer/entity"
+	"github.com/Lion-Leporidae/sourcelex/internal/analyzer/entity"
 	sitter "github.com/smacker/go-tree-sitter"
 )
 

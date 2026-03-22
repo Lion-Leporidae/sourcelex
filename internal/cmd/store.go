@@ -10,12 +10,12 @@ import (
 
 	"github.com/spf13/cobra"
 
-	"github.com/repomind/repomind-go/internal/analyzer"
-	"github.com/repomind/repomind-go/internal/git"
-	"github.com/repomind/repomind-go/internal/monitor"
-	"github.com/repomind/repomind-go/internal/store"
-	"github.com/repomind/repomind-go/internal/store/graph"
-	"github.com/repomind/repomind-go/internal/store/vector"
+	"github.com/Lion-Leporidae/sourcelex/internal/analyzer"
+	"github.com/Lion-Leporidae/sourcelex/internal/git"
+	"github.com/Lion-Leporidae/sourcelex/internal/monitor"
+	"github.com/Lion-Leporidae/sourcelex/internal/store"
+	"github.com/Lion-Leporidae/sourcelex/internal/store/graph"
+	"github.com/Lion-Leporidae/sourcelex/internal/store/vector"
 )
 
 // RepoMetadata 仓库元数据，持久化到数据目录供 serve 命令使用
@@ -45,8 +45,8 @@ var storeCmd = &cobra.Command{
   • 指定分支/标签/提交
 
 示例:
-  repomind store --repo https://github.com/user/repo
-  repomind store --path ./local-repo --branch main`,
+  sourcelex store --repo https://github.com/user/repo
+  sourcelex store --path ./local-repo --branch main`,
 	RunE: runStore,
 }
 

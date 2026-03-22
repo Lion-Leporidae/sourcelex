@@ -12,14 +12,14 @@ import (
 
 	"github.com/spf13/cobra"
 
-	"github.com/repomind/repomind-go/internal/agent"
-	"github.com/repomind/repomind-go/internal/agent/llm"
-	repogit "github.com/repomind/repomind-go/internal/git"
-	"github.com/repomind/repomind-go/internal/mcp"
-	"github.com/repomind/repomind-go/internal/store"
-	"github.com/repomind/repomind-go/internal/store/graph"
-	"github.com/repomind/repomind-go/internal/store/vector"
-	"github.com/repomind/repomind-go/internal/web"
+	"github.com/Lion-Leporidae/sourcelex/internal/agent"
+	"github.com/Lion-Leporidae/sourcelex/internal/agent/llm"
+	repogit "github.com/Lion-Leporidae/sourcelex/internal/git"
+	"github.com/Lion-Leporidae/sourcelex/internal/mcp"
+	"github.com/Lion-Leporidae/sourcelex/internal/store"
+	"github.com/Lion-Leporidae/sourcelex/internal/store/graph"
+	"github.com/Lion-Leporidae/sourcelex/internal/store/vector"
+	"github.com/Lion-Leporidae/sourcelex/internal/web"
 )
 
 var (
@@ -42,8 +42,8 @@ var serveCmd = &cobra.Command{
 默认监听 0.0.0.0:8000
 
 示例:
-  repomind serve
-  repomind serve --port 9000`,
+  sourcelex serve
+  sourcelex serve --port 9000`,
 	RunE: runServe,
 }
 

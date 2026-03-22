@@ -1,20 +1,20 @@
 // Package agent provides an AI-powered code analysis agent.
 // It orchestrates LLM calls with knowledge base tool use to answer
-// questions about codebases indexed by RepoMind.
+// questions about codebases indexed by Sourcelex.
 package agent
 
 import (
 	"context"
 	"fmt"
 
-	"github.com/repomind/repomind-go/internal/agent/llm"
-	"github.com/repomind/repomind-go/internal/logger"
-	"github.com/repomind/repomind-go/internal/store"
+	"github.com/Lion-Leporidae/sourcelex/internal/agent/llm"
+	"github.com/Lion-Leporidae/sourcelex/internal/logger"
+	"github.com/Lion-Leporidae/sourcelex/internal/store"
 )
 
 const defaultMaxIterations = 10
 
-const systemPrompt = `你是 RepoMind 代码知识库智能助手。你可以通过工具查询已索引的代码库，帮助用户理解代码结构、分析调用关系、定位功能实现。
+const systemPrompt = `你是 Sourcelex 代码知识库智能助手。你可以通过工具查询已索引的代码库，帮助用户理解代码结构、分析调用关系、定位功能实现。
 
 工作方式：
 1. 理解用户的问题，判断需要调用哪些工具

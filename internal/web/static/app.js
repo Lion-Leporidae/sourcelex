@@ -1,4 +1,4 @@
-// RepoMind Web UI
+// Sourcelex Web UI
 
 (function () {
   "use strict";

@@ -98,13 +98,13 @@ type LoggingConfig struct {
 }
 
 // Load reads configuration from the specified file or default locations.
-// It also applies environment variable overrides with REPOMIND_ prefix.
+// It also applies environment variable overrides with SOURCELEX_ prefix.
 func Load(cfgFile string) (*Config, error) {
 	// 设置默认值
 	setDefaults()
 
 	// 环境变量前缀
-	viper.SetEnvPrefix("REPOMIND")
+	viper.SetEnvPrefix("SOURCELEX")
 	viper.SetEnvKeyReplacer(strings.NewReplacer(".", "_"))
 	viper.AutomaticEnv()
 
@@ -120,7 +120,7 @@ func Load(cfgFile string) (*Config, error) {
 
 		// 用户主目录
 		if home, err := os.UserHomeDir(); err == nil {
-			viper.AddConfigPath(filepath.Join(home, ".repomind"))
+			viper.AddConfigPath(filepath.Join(home, ".sourcelex"))
 		}
 	}
 

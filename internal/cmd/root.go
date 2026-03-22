@@ -7,8 +7,8 @@ import (
 
 	"github.com/spf13/cobra"
 
-	"github.com/repomind/repomind-go/internal/config"
-	"github.com/repomind/repomind-go/internal/logger"
+	"github.com/Lion-Leporidae/sourcelex/internal/config"
+	"github.com/Lion-Leporidae/sourcelex/internal/logger"
 )
 
 var (
@@ -19,16 +19,16 @@ var (
 
 // rootCmd represents the base command when called without any subcommands
 var rootCmd = &cobra.Command{
-	Use:   "repomind",
-	Short: "RepoMind - 代码知识库系统",
-	Long: `RepoMind 是一个代码知识库系统，提供：
+	Use:   "sourcelex",
+	Short: "Sourcelex - 代码知识库系统",
+	Long: `Sourcelex 是一个代码知识库系统，提供：
   • 代码语义搜索
   • 函数调用关系分析
   • MCP 协议服务
 
 使用示例:
-  repomind store --repo https://github.com/user/repo
-  repomind serve --port 8000`,
+  sourcelex store --repo https://github.com/user/repo
+  sourcelex serve --port 8000`,
 	PersistentPreRunE: func(cmd *cobra.Command, args []string) error {
 		return initializeApp()
 	},
@@ -65,7 +65,7 @@ func initializeApp() error {
 		return fmt.Errorf("初始化日志失败: %w", err)
 	}
 
-	log.Info("RepoMind 初始化完成",
+	log.Info("Sourcelex 初始化完成",
 		"data_dir", cfg.Paths.DataDir,
 		"log_level", cfg.Logging.Level,
 	)

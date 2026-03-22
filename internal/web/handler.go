@@ -1,4 +1,4 @@
-// Package web provides the embedded web UI and agent API endpoints for RepoMind.
+// Package web provides the embedded web UI and agent API endpoints for Sourcelex.
 // Static files are embedded via Go's embed package for single-binary distribution.
 package web
 
@@ -12,10 +12,10 @@ import (
 
 	"github.com/gin-gonic/gin"
 
-	"github.com/repomind/repomind-go/internal/agent"
-	"github.com/repomind/repomind-go/internal/logger"
-	"github.com/repomind/repomind-go/internal/store"
-	"github.com/repomind/repomind-go/internal/store/graph"
+	"github.com/Lion-Leporidae/sourcelex/internal/agent"
+	"github.com/Lion-Leporidae/sourcelex/internal/logger"
+	"github.com/Lion-Leporidae/sourcelex/internal/store"
+	"github.com/Lion-Leporidae/sourcelex/internal/store/graph"
 )
 
 //go:embed static/*

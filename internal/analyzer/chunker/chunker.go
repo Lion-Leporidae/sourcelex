@@ -16,7 +16,7 @@ import (
 	"strings"
 	"sync"
 
-	"github.com/repomind/repomind-go/internal/analyzer/entity"
+	"github.com/Lion-Leporidae/sourcelex/internal/analyzer/entity"
 )
 
 // CodeChunk 表示基于符号边界的代码分块

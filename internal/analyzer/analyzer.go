@@ -8,10 +8,10 @@ import (
 	"path/filepath"
 	"sync"
 
-	"github.com/repomind/repomind-go/internal/analyzer/entity"
-	"github.com/repomind/repomind-go/internal/analyzer/parser"
-	"github.com/repomind/repomind-go/internal/analyzer/relation"
-	"github.com/repomind/repomind-go/internal/logger"
+	"github.com/Lion-Leporidae/sourcelex/internal/analyzer/entity"
+	"github.com/Lion-Leporidae/sourcelex/internal/analyzer/parser"
+	"github.com/Lion-Leporidae/sourcelex/internal/analyzer/relation"
+	"github.com/Lion-Leporidae/sourcelex/internal/logger"
 )
 
 // Analyzer is the main code analyzer that orchestrates parsing and entity extraction

@@ -5,9 +5,9 @@ import (
 	"encoding/json"
 	"fmt"
 
-	"github.com/repomind/repomind-go/internal/agent/llm"
-	"github.com/repomind/repomind-go/internal/store"
-	"github.com/repomind/repomind-go/internal/store/graph"
+	"github.com/Lion-Leporidae/sourcelex/internal/agent/llm"
+	"github.com/Lion-Leporidae/sourcelex/internal/store"
+	"github.com/Lion-Leporidae/sourcelex/internal/store/graph"
 )
 
 // AllTools returns all tool definitions available to the agent
