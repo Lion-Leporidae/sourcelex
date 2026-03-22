@@ -59,30 +59,40 @@ type MCPError struct {
 //
 // SSE 连接流程:
 // 1. 客户端建立 SSE 连接
-// 2. 服务器发送心跳保持连接
-// 3. 客户端通过其他端点发送请求
-// 4. 服务器通过 SSE 推送响应
+// 2. 服务器发送连接确认和能力列表
+// 3. 服务器通过心跳保持连接
+// 4. 服务器推送 MCP 工具列表
 func (s *Server) handleSSE(c *gin.Context) {
-	// 设置 SSE 响应头
 	c.Header("Content-Type", "text/event-stream")
 	c.Header("Cache-Control", "no-cache")
 	c.Header("Connection", "keep-alive")
 	c.Header("Access-Control-Allow-Origin", "*")
 
-	// 发送初始化消息
+	// 发送连接确认
 	s.sendSSEEvent(c, SSEEvent{
 		Event: "connected",
 		Data: map[string]interface{}{
 			"message": "MCP SSE 连接已建立",
 			"version": "1.0.0",
+			"capabilities": map[string]interface{}{
+				"tools":  true,
+				"search": true,
+				"graph":  true,
+			},
 		},
 	})
 
-	// 创建心跳定时器
+	// 发送可用工具列表
+	s.sendSSEEvent(c, SSEEvent{
+		Event: "tools",
+		Data: map[string]interface{}{
+			"tools": s.getMCPTools(),
+		},
+	})
+
 	ticker := time.NewTicker(15 * time.Second)
 	defer ticker.Stop()
 
-	// 监听客户端断开
 	clientGone := c.Request.Context().Done()
 
 	for {
@@ -92,12 +102,105 @@ func (s *Server) handleSSE(c *gin.Context) {
 			return
 
 		case <-ticker.C:
-			// 发送心跳
 			s.sendSSEEvent(c, SSEEvent{
 				Event: "heartbeat",
 				Data:  map[string]interface{}{"timestamp": time.Now().Unix()},
 			})
 		}
+	}
+}
+
+// getMCPTools 返回 MCP 可用工具列表
+func (s *Server) getMCPTools() []map[string]interface{} {
+	return []map[string]interface{}{
+		{
+			"name":        "search_semantic",
+			"description": "语义搜索代码实体",
+			"parameters": map[string]interface{}{
+				"query": "string - 搜索查询",
+				"top_k": "int - 返回数量",
+			},
+		},
+		{
+			"name":        "get_entity",
+			"description": "获取代码实体详情",
+			"parameters": map[string]interface{}{
+				"id": "string - 实体 ID",
+			},
+		},
+		{
+			"name":        "get_callchain",
+			"description": "获取紧凑调用链文本（推荐：比 JSON 节省 95% token）。depth=1 返回一行摘要，depth>1 返回树形展开",
+			"parameters": map[string]interface{}{
+				"id":    "string - 实体 ID（QualifiedName）",
+				"depth": "int - 遍历深度（默认 1）",
+			},
+		},
+		{
+			"name":        "get_graph_summary",
+			"description": "获取完整调用图的紧凑文本摘要（推荐：一次请求了解全部调用关系）。按文件分组的邻接表",
+			"parameters": map[string]interface{}{
+				"file": "string - 可选，按文件路径过滤",
+			},
+		},
+		{
+			"name":        "get_callmap",
+			"description": "获取调用关系图（JSON 详细格式，需要结构化数据时使用）",
+			"parameters": map[string]interface{}{
+				"id":    "string - 实体 ID",
+				"depth": "int - 遍历深度",
+			},
+		},
+		{
+			"name":        "get_callers",
+			"description": "获取调用者列表",
+			"parameters": map[string]interface{}{
+				"id":    "string - 实体 ID",
+				"depth": "int - 遍历深度",
+			},
+		},
+		{
+			"name":        "get_callees",
+			"description": "获取被调用者列表",
+			"parameters": map[string]interface{}{
+				"id":    "string - 实体 ID",
+				"depth": "int - 遍历深度",
+			},
+		},
+		{
+			"name":        "get_function_graph",
+			"description": "获取功能图谱",
+			"parameters": map[string]interface{}{
+				"type": "string - 节点类型过滤",
+				"file": "string - 文件路径过滤",
+			},
+		},
+		{
+			"name":        "get_subgraph",
+			"description": "获取以指定实体为中心的子图",
+			"parameters": map[string]interface{}{
+				"id":    "string - 中心实体 ID",
+				"depth": "int - 遍历深度",
+			},
+		},
+		{
+			"name":        "find_path",
+			"description": "查找两个实体之间的调用路径",
+			"parameters": map[string]interface{}{
+				"from": "string - 源实体 ID",
+				"to":   "string - 目标实体 ID",
+			},
+		},
+		{
+			"name":        "detect_cycles",
+			"description": "检测循环依赖",
+			"parameters": map[string]interface{}{},
+		},
+		{
+			"name":        "get_workspace",
+			"description": "获取工作区统计信息",
+			"parameters": map[string]interface{}{},
+		},
 	}
 }
 
@@ -182,4 +285,83 @@ func (sw *StreamWriter) WriteEvent(event string, data interface{}) error {
 	sw.flusher.Flush()
 
 	return nil
+}
+
+// handleMCPRequest 处理 MCP 工具调用请求
+// POST /mcp/request
+func (s *Server) handleMCPRequest(c *gin.Context) {
+	var msg MCPMessage
+	if err := c.ShouldBindJSON(&msg); err != nil {
+		c.JSON(400, gin.H{"error": "无效的 MCP 请求: " + err.Error()})
+		return
+	}
+
+	if msg.Type != "request" {
+		c.JSON(400, gin.H{"error": "仅接受 request 类型消息"})
+		return
+	}
+
+	ctx := c.Request.Context()
+	var result interface{}
+	var reqErr error
+
+	switch msg.Method {
+	case "search_semantic":
+		query, _ := msg.Params["query"].(string)
+		topK := 10
+		if tk, ok := msg.Params["top_k"].(float64); ok {
+			topK = int(tk)
+		}
+		result, reqErr = s.store.SemanticSearch(ctx, query, topK)
+
+	case "get_entity":
+		id, _ := msg.Params["id"].(string)
+		result, reqErr = s.store.GetEntity(ctx, id)
+
+	case "get_callchain":
+		id, _ := msg.Params["id"].(string)
+		depth := 1
+		if d, ok := msg.Params["depth"].(float64); ok {
+			depth = int(d)
+		}
+		result, reqErr = s.store.CallChainCompact(ctx, id, depth)
+
+	case "get_graph_summary":
+		file, _ := msg.Params["file"].(string)
+		result, reqErr = s.store.CallGraphSummary(ctx, file)
+
+	case "get_callmap":
+		id, _ := msg.Params["id"].(string)
+		depth := 1
+		if d, ok := msg.Params["depth"].(float64); ok {
+			depth = int(d)
+		}
+		callers, _ := s.store.GetCallersOf(ctx, id, depth)
+		callees, _ := s.store.GetCalleesOf(ctx, id, depth)
+		result = map[string]interface{}{"callers": callers, "callees": callees}
+
+	case "get_workspace":
+		result, reqErr = s.store.Stats(ctx)
+
+	default:
+		reqErr = fmt.Errorf("未知的 MCP 方法: %s", msg.Method)
+	}
+
+	if reqErr != nil {
+		c.JSON(200, MCPMessage{
+			Type: "response",
+			ID:   msg.ID,
+			Error: &MCPError{
+				Code:    -1,
+				Message: reqErr.Error(),
+			},
+		})
+		return
+	}
+
+	c.JSON(200, MCPMessage{
+		Type:   "response",
+		ID:     msg.ID,
+		Result: result,
+	})
 }

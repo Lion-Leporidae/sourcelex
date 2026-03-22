@@ -21,6 +21,7 @@ import (
 
 	"github.com/gin-gonic/gin"
 
+	repogit "github.com/repomind/repomind-go/internal/git"
 	"github.com/repomind/repomind-go/internal/logger"
 	"github.com/repomind/repomind-go/internal/store"
 )
@@ -37,6 +38,9 @@ type Server struct {
 	// store 知识存储
 	store *store.KnowledgeStore
 
+	// gitRepo Git 仓库（用于历史分析，可能为 nil）
+	gitRepo *repogit.Repository
+
 	// log 日志器
 	log *logger.Logger
 
@@ -49,10 +53,11 @@ type Server struct {
 
 // Config 服务器配置
 type Config struct {
-	Host  string
-	Port  int
-	Store *store.KnowledgeStore
-	Log   *logger.Logger
+	Host    string
+	Port    int
+	Store   *store.KnowledgeStore
+	GitRepo *repogit.Repository
+	Log     *logger.Logger
 }
 
 // New 创建 MCP 服务器
@@ -83,11 +88,12 @@ func New(cfg Config) *Server {
 	router.Use(loggingMiddleware(cfg.Log)) // 请求日志
 
 	server := &Server{
-		router: router,
-		store:  cfg.Store,
-		log:    cfg.Log,
-		host:   cfg.Host,
-		port:   cfg.Port,
+		router:  router,
+		store:   cfg.Store,
+		gitRepo: cfg.GitRepo,
+		log:     cfg.Log,
+		host:    cfg.Host,
+		port:    cfg.Port,
 	}
 
 	// 注册路由
@@ -110,16 +116,40 @@ func (s *Server) setupRoutes() {
 
 		// 搜索工具 (Search Tools)
 		v1.POST("/search/semantic", s.handleSemanticSearch) // 语义搜索
+		v1.POST("/search/hybrid", s.handleHybridSearch)     // 混合搜索
+		v1.POST("/search/context", s.handleContextSearch)   // 上下文感知搜索
 		v1.GET("/entity/:id", s.handleGetEntity)            // 实体查询
 
+		// RAG 工具
+		v1.POST("/rag/context", s.handleRAGContext)         // RAG 上下文组装
+
 		// 关系工具 (Relation Tools)
-		v1.GET("/callmap/:id", s.handleGetCallMap) // 调用关系
+		v1.GET("/callmap/:id", s.handleGetCallMap) // 调用关系（JSON 详细格式）
 		v1.GET("/callers/:id", s.handleGetCallers) // 谁调用了此函数
 		v1.GET("/callees/:id", s.handleGetCallees) // 此函数调用了谁
+
+		// 紧凑调用链工具 (Compact Call Chain Tools) — AI 优先使用
+		v1.GET("/callchain/:id", s.handleGetCallChain)   // 紧凑调用链（token 最优）
+		v1.GET("/graph/summary", s.handleGetGraphSummary) // 全图调用摘要（token 最优）
+
+		// 功能图谱工具 (Function Graph Tools)
+		v1.GET("/graph/function", s.handleGetFunctionGraph)  // 功能图谱
+		v1.GET("/graph/subgraph/:id", s.handleGetSubgraph)   // 子图
+		v1.GET("/graph/path", s.handleFindPath)              // 路径查找
+		v1.GET("/graph/cycles", s.handleDetectCycles)        // 循环依赖检测
+		v1.GET("/graph/topo-sort", s.handleTopologicalSort)  // 拓扑排序
+
+		// 历史分析工具 (History Analysis Tools)
+		v1.GET("/history/commits", s.handleGetCommits)            // 提交历史搜索
+		v1.GET("/history/commit/:hash", s.handleGetCommitDetail)  // 提交详情
+		v1.GET("/history/file", s.handleGetFileHistory)            // 文件变更历史
+		v1.GET("/history/blame", s.handleGetBlame)                 // 文件 Blame
+		v1.GET("/history/entity", s.handleGetEntityHistory)        // 实体变更历史
 	}
 
-	// MCP 协议端点（SSE）
+	// MCP 协议端点
 	s.router.GET("/mcp/sse", s.handleSSE)
+	s.router.POST("/mcp/request", s.handleMCPRequest)
 }
 
 // Start 启动服务器
@@ -135,6 +165,11 @@ func (s *Server) Start() error {
 
 	s.log.Info("MCP 服务器启动", "address", addr)
 	return s.httpServer.ListenAndServe()
+}
+
+// Router returns the underlying Gin engine for registering additional routes
+func (s *Server) Router() *gin.Engine {
+	return s.router
 }
 
 // Shutdown 优雅关闭服务器
