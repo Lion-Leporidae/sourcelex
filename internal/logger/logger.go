@@ -62,6 +62,12 @@ func New(level, format string) (*Logger, error) {
 	return &Logger{zapLogger.Sugar()}, nil
 }
 
+// NewDefault creates a default logger with info level
+func NewDefault() *Logger {
+	l, _ := New("info", "text")
+	return l
+}
+
 // NewNop creates a no-op logger for testing
 func NewNop() *Logger {
 	return &Logger{zap.NewNop().Sugar()}
