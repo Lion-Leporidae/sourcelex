@@ -2,6 +2,7 @@ package cmd
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -16,6 +17,14 @@ import (
 	"github.com/repomind/repomind-go/internal/store/graph"
 	"github.com/repomind/repomind-go/internal/store/vector"
 )
+
+// RepoMetadata 仓库元数据，持久化到数据目录供 serve 命令使用
+type RepoMetadata struct {
+	RepoPath  string    `json:"repo_path"`
+	RepoURL   string    `json:"repo_url,omitempty"`
+	Branch    string    `json:"branch,omitempty"`
+	IndexedAt time.Time `json:"indexed_at"`
+}
 
 var (
 	repoURL      string
@@ -199,7 +208,8 @@ func runStore(cmd *cobra.Command, args []string) error {
 		VectorStore: vectorStore,
 		GraphStore:  graphStore,
 		Embedder:    embedder,
-		RepoPath:    targetPath, // 用于分块器读取代码内容
+		RepoPath:    targetPath,
+		Log:         log,
 	})
 	defer knowledgeStore.Close()
 
@@ -259,6 +269,23 @@ func runStore(cmd *cobra.Command, args []string) error {
 			"nodes", stats.NodeCount,
 			"edges", stats.EdgeCount,
 		)
+	}
+
+	// 9. 保存仓库元数据（供 serve 命令加载 git 历史）
+	meta := RepoMetadata{
+		RepoPath:  targetPath,
+		RepoURL:   repoURL,
+		Branch:    repoBranch,
+		IndexedAt: time.Now(),
+	}
+	metaPath := filepath.Join(cfg.Paths.DataDir, "metadata.json")
+	metaData, err := json.MarshalIndent(meta, "", "  ")
+	if err == nil {
+		if writeErr := os.WriteFile(metaPath, metaData, 0644); writeErr != nil {
+			log.Warn("保存仓库元数据失败", "error", writeErr)
+		} else {
+			log.Info("仓库元数据已保存", "path", metaPath)
+		}
 	}
 
 	log.Info("知识库更新完成")
