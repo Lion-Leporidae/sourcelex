@@ -366,11 +366,17 @@ func (e *Extractor) extractJSCall(node *sitter.Node) *CallRelation {
 
 // walkNodeWithScope 遍历 AST 并维护作用域
 func (e *Extractor) walkNodeWithScope(node *sitter.Node, callback func(*sitter.Node, string)) {
+	scopeBefore := e.currentScope
 	callback(node, e.currentScope)
+	scopeChanged := e.currentScope != scopeBefore
 
 	for i := 0; i < int(node.ChildCount()); i++ {
 		child := node.Child(i)
 		e.walkNodeWithScope(child, callback)
+	}
+
+	if scopeChanged {
+		e.popScope()
 	}
 }
 
