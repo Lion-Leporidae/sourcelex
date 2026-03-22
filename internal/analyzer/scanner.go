@@ -6,6 +6,7 @@ import (
 	"context"
 	"crypto/sha1"
 	"encoding/hex"
+	"encoding/json"
 	"fmt"
 	"io"
 	"os"
@@ -40,18 +41,22 @@ type FileState struct {
 
 // FileScanner scans repository files with incremental update detection
 type FileScanner struct {
-	repoPath string
-	cache    map[string]FileState
-	log      *logger.Logger
+	repoPath  string
+	cache     map[string]FileState
+	cachePath string
+	log       *logger.Logger
 }
 
 // NewFileScanner creates a new file scanner
 func NewFileScanner(repoPath string, log *logger.Logger) *FileScanner {
-	return &FileScanner{
-		repoPath: repoPath,
-		cache:    make(map[string]FileState),
-		log:      log,
+	scanner := &FileScanner{
+		repoPath:  repoPath,
+		cache:     make(map[string]FileState),
+		cachePath: filepath.Join(repoPath, ".repomind_cache.json"),
+		log:       log,
 	}
+	scanner.loadCache()
+	return scanner
 }
 
 // ScanResult holds the result of a file scan
@@ -162,6 +167,11 @@ func (s *FileScanner) Scan(ctx context.Context) (*ScanResult, error) {
 
 	result.TotalFiles = len(result.NewFiles) + len(result.ModifiedFiles) + len(result.UnchangedFiles)
 
+	// 持久化扫描缓存
+	if err := s.SaveCache(); err != nil {
+		s.log.Warn("保存扫描缓存失败", "error", err)
+	}
+
 	return result, nil
 }
 
@@ -207,4 +217,42 @@ func GetLanguage(path string) string {
 		return lang
 	}
 	return ""
+}
+
+// loadCache 从文件加载扫描缓存
+func (s *FileScanner) loadCache() {
+	data, err := os.ReadFile(s.cachePath)
+	if err != nil {
+		return
+	}
+
+	var cached map[string]FileState
+	if err := json.Unmarshal(data, &cached); err != nil {
+		s.log.Debug("缓存文件解析失败，将重建", "error", err)
+		return
+	}
+
+	s.cache = cached
+	s.log.Debug("已加载扫描缓存", "entries", len(cached))
+}
+
+// SaveCache 将扫描缓存持久化到文件
+func (s *FileScanner) SaveCache() error {
+	data, err := json.Marshal(s.cache)
+	if err != nil {
+		return fmt.Errorf("序列化缓存失败: %w", err)
+	}
+
+	if err := os.WriteFile(s.cachePath, data, 0644); err != nil {
+		return fmt.Errorf("写入缓存文件失败: %w", err)
+	}
+
+	s.log.Debug("已保存扫描缓存", "entries", len(s.cache))
+	return nil
+}
+
+// SetCachePath 设置缓存文件路径
+func (s *FileScanner) SetCachePath(path string) {
+	s.cachePath = path
+	s.loadCache()
 }

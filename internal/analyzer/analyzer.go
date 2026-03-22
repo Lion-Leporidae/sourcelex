@@ -152,6 +152,7 @@ func (a *Analyzer) analyzeFiles(ctx context.Context, files []string) ([]entity.E
 				// 提取实体
 				extractor := entity.NewExtractor(result.Content, relPath, lang)
 				fileEntities := extractor.Extract(result.Tree)
+				result.Tree.Close()
 
 				mu.Lock()
 				entities = append(entities, fileEntities...)
@@ -213,6 +214,7 @@ func (a *Analyzer) extractRelations(ctx context.Context, files []string, entitie
 				// 提取调用关系
 				extractor := relation.NewExtractor(result.Content, relPath, lang, symbolTable)
 				fileRelations := extractor.Extract(result.Tree)
+				result.Tree.Close()
 
 				if len(fileRelations) > 0 {
 					mu.Lock()
