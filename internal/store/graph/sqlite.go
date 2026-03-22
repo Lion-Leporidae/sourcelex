@@ -388,28 +388,49 @@ func (s *SQLiteStore) GetCalleesOf(ctx context.Context, id string, depth int) ([
 	return s.scanNodes(rows)
 }
 
-// FindPath 查找两个节点之间的路径
+// FindPath 查找两个节点之间的最短路径 (BFS)
 func (s *SQLiteStore) FindPath(ctx context.Context, sourceID, targetID string) (*PathResult, error) {
-	// SQLite 的 CTE 功能有限，这里使用简化实现
-	// 只查找直接关系
-	query := `
-	SELECT type FROM relationships
-	WHERE source_id = ? AND target_id = ?
-	LIMIT 1
-	`
-	var relType string
-	err := s.db.QueryRowContext(ctx, query, sourceID, targetID).Scan(&relType)
-	if err == sql.ErrNoRows {
-		return nil, nil // 无直接路径
-	}
-	if err != nil {
-		return nil, fmt.Errorf("查询路径失败: %w", err)
+	if sourceID == targetID {
+		return &PathResult{Path: []string{sourceID}}, nil
 	}
 
-	return &PathResult{
-		Path:  []string{sourceID, targetID},
-		Edges: []Edge{{Source: sourceID, Target: targetID, Type: EdgeType(relType)}},
-	}, nil
+	edges, err := s.GetAllEdges(ctx)
+	if err != nil {
+		return nil, err
+	}
+
+	adjacency := make(map[string][]Edge)
+	for _, e := range edges {
+		adjacency[e.Source] = append(adjacency[e.Source], e)
+	}
+
+	visited := make(map[string]bool)
+	parent := make(map[string]string)
+	parentEdge := make(map[string]*Edge)
+
+	queue := []string{sourceID}
+	visited[sourceID] = true
+
+	for len(queue) > 0 {
+		current := queue[0]
+		queue = queue[1:]
+
+		for _, edge := range adjacency[current] {
+			if !visited[edge.Target] {
+				visited[edge.Target] = true
+				parent[edge.Target] = current
+				edgeCopy := edge
+				parentEdge[edge.Target] = &edgeCopy
+				queue = append(queue, edge.Target)
+
+				if edge.Target == targetID {
+					return reconstructPath(sourceID, targetID, parent, parentEdge), nil
+				}
+			}
+		}
+	}
+
+	return nil, nil
 }
 
 // DeleteNode 删除节点及其关系
@@ -474,6 +495,158 @@ func (s *SQLiteStore) SaveToFile(path string) error {
 func (s *SQLiteStore) LoadFromFile(path string) error {
 	// SQLite 在 NewSQLiteStore 时已加载
 	return nil
+}
+
+// GetAllNodes 获取所有节点
+func (s *SQLiteStore) GetAllNodes(ctx context.Context) ([]Node, error) {
+	query := `SELECT id, name, type, file_path, start_line, end_line, signature FROM entities`
+	rows, err := s.db.QueryContext(ctx, query)
+	if err != nil {
+		return nil, fmt.Errorf("查询所有节点失败: %w", err)
+	}
+	defer rows.Close()
+	return s.scanNodes(rows)
+}
+
+// GetAllEdges 获取所有边
+func (s *SQLiteStore) GetAllEdges(ctx context.Context) ([]Edge, error) {
+	query := `SELECT source_id, target_id, type FROM relationships`
+	rows, err := s.db.QueryContext(ctx, query)
+	if err != nil {
+		return nil, fmt.Errorf("查询所有边失败: %w", err)
+	}
+	defer rows.Close()
+
+	var edges []Edge
+	for rows.Next() {
+		var e Edge
+		var edgeType string
+		if err := rows.Scan(&e.Source, &e.Target, &edgeType); err != nil {
+			return nil, fmt.Errorf("扫描边失败: %w", err)
+		}
+		e.Type = EdgeType(edgeType)
+		edges = append(edges, e)
+	}
+	return edges, rows.Err()
+}
+
+// GetSubgraph 获取以指定节点为中心的子图
+func (s *SQLiteStore) GetSubgraph(ctx context.Context, id string, depth int) (*SubgraphResult, error) {
+	query := `
+	WITH RECURSIVE related AS (
+		SELECT ? as node_id, 0 as depth
+		
+		UNION
+		
+		SELECT r.target_id, rel.depth + 1
+		FROM relationships r
+		INNER JOIN related rel ON r.source_id = rel.node_id
+		WHERE rel.depth < ?
+		
+		UNION
+		
+		SELECT r.source_id, rel.depth + 1
+		FROM relationships r
+		INNER JOIN related rel ON r.target_id = rel.node_id
+		WHERE rel.depth < ?
+	)
+	SELECT DISTINCT e.id, e.name, e.type, e.file_path, e.start_line, e.end_line, e.signature
+	FROM entities e
+	INNER JOIN related rel ON e.id = rel.node_id
+	`
+	rows, err := s.db.QueryContext(ctx, query, id, depth, depth)
+	if err != nil {
+		return nil, fmt.Errorf("查询子图节点失败: %w", err)
+	}
+	defer rows.Close()
+
+	nodes, err := s.scanNodes(rows)
+	if err != nil {
+		return nil, err
+	}
+
+	nodeIDs := make(map[string]bool)
+	for _, n := range nodes {
+		nodeIDs[n.ID] = true
+	}
+
+	allEdges, err := s.GetAllEdges(ctx)
+	if err != nil {
+		return nil, err
+	}
+
+	var subEdges []Edge
+	for _, e := range allEdges {
+		if nodeIDs[e.Source] && nodeIDs[e.Target] {
+			subEdges = append(subEdges, e)
+		}
+	}
+
+	return &SubgraphResult{
+		Nodes:    nodes,
+		Edges:    subEdges,
+		CenterID: id,
+		Depth:    depth,
+	}, nil
+}
+
+// GetNodesByFile 获取指定文件中的所有节点
+func (s *SQLiteStore) GetNodesByFile(ctx context.Context, filePath string) ([]Node, error) {
+	query := `SELECT id, name, type, file_path, start_line, end_line, signature FROM entities WHERE file_path = ?`
+	rows, err := s.db.QueryContext(ctx, query, filePath)
+	if err != nil {
+		return nil, fmt.Errorf("查询文件节点失败: %w", err)
+	}
+	defer rows.Close()
+	return s.scanNodes(rows)
+}
+
+// GetNodesByType 获取指定类型的所有节点
+func (s *SQLiteStore) GetNodesByType(ctx context.Context, nodeType NodeType) ([]Node, error) {
+	query := `SELECT id, name, type, file_path, start_line, end_line, signature FROM entities WHERE type = ?`
+	rows, err := s.db.QueryContext(ctx, query, string(nodeType))
+	if err != nil {
+		return nil, fmt.Errorf("查询类型节点失败: %w", err)
+	}
+	defer rows.Close()
+	return s.scanNodes(rows)
+}
+
+// DetectCycles 检测调用图中的环
+func (s *SQLiteStore) DetectCycles(ctx context.Context) ([][]string, error) {
+	edges, err := s.GetAllEdges(ctx)
+	if err != nil {
+		return nil, err
+	}
+
+	adjacency := make(map[string][]string)
+	for _, e := range edges {
+		if e.Type == EdgeTypeCalls {
+			adjacency[e.Source] = append(adjacency[e.Source], e.Target)
+		}
+	}
+
+	return detectCyclesDFS(adjacency), nil
+}
+
+// TopologicalSort 对调用图进行拓扑排序
+func (s *SQLiteStore) TopologicalSort(ctx context.Context) ([]string, error) {
+	edges, err := s.GetAllEdges(ctx)
+	if err != nil {
+		return nil, err
+	}
+
+	adjacency := make(map[string][]string)
+	allNodes := make(map[string]bool)
+	for _, e := range edges {
+		if e.Type == EdgeTypeCalls {
+			adjacency[e.Source] = append(adjacency[e.Source], e.Target)
+			allNodes[e.Source] = true
+			allNodes[e.Target] = true
+		}
+	}
+
+	return topologicalSortKahn(adjacency, allNodes), nil
 }
 
 // scanNodes 扫描查询结果为节点列表

@@ -447,6 +447,147 @@ func (s *MemoryStore) LoadFromFile(path string) error {
 	return nil
 }
 
+// GetAllNodes 获取所有节点
+func (s *MemoryStore) GetAllNodes(ctx context.Context) ([]Node, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	nodes := make([]Node, 0, len(s.nodes))
+	for _, node := range s.nodes {
+		nodes = append(nodes, *node)
+	}
+	return nodes, nil
+}
+
+// GetAllEdges 获取所有边
+func (s *MemoryStore) GetAllEdges(ctx context.Context) ([]Edge, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	var edges []Edge
+	for _, edgeList := range s.outEdges {
+		edges = append(edges, edgeList...)
+	}
+	return edges, nil
+}
+
+// GetSubgraph 获取以指定节点为中心的子图
+func (s *MemoryStore) GetSubgraph(ctx context.Context, id string, depth int) (*SubgraphResult, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	visited := make(map[string]bool)
+	queue := []string{id}
+	visited[id] = true
+
+	for d := 0; d < depth && len(queue) > 0; d++ {
+		var nextQueue []string
+		for _, nodeID := range queue {
+			for _, edge := range s.outEdges[nodeID] {
+				if !visited[edge.Target] {
+					visited[edge.Target] = true
+					nextQueue = append(nextQueue, edge.Target)
+				}
+			}
+			for _, edge := range s.inEdges[nodeID] {
+				if !visited[edge.Source] {
+					visited[edge.Source] = true
+					nextQueue = append(nextQueue, edge.Source)
+				}
+			}
+		}
+		queue = nextQueue
+	}
+
+	var nodes []Node
+	for nodeID := range visited {
+		if node, ok := s.nodes[nodeID]; ok {
+			nodes = append(nodes, *node)
+		}
+	}
+
+	var edges []Edge
+	for _, edgeList := range s.outEdges {
+		for _, e := range edgeList {
+			if visited[e.Source] && visited[e.Target] {
+				edges = append(edges, e)
+			}
+		}
+	}
+
+	return &SubgraphResult{
+		Nodes:    nodes,
+		Edges:    edges,
+		CenterID: id,
+		Depth:    depth,
+	}, nil
+}
+
+// GetNodesByFile 获取指定文件中的所有节点
+func (s *MemoryStore) GetNodesByFile(ctx context.Context, filePath string) ([]Node, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	var nodes []Node
+	for _, node := range s.nodes {
+		if node.FilePath == filePath {
+			nodes = append(nodes, *node)
+		}
+	}
+	return nodes, nil
+}
+
+// GetNodesByType 获取指定类型的所有节点
+func (s *MemoryStore) GetNodesByType(ctx context.Context, nodeType NodeType) ([]Node, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	var nodes []Node
+	for _, node := range s.nodes {
+		if node.Type == nodeType {
+			nodes = append(nodes, *node)
+		}
+	}
+	return nodes, nil
+}
+
+// DetectCycles 检测调用图中的环
+func (s *MemoryStore) DetectCycles(ctx context.Context) ([][]string, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	adjacency := make(map[string][]string)
+	for src, edges := range s.outEdges {
+		for _, e := range edges {
+			if e.Type == EdgeTypeCalls {
+				adjacency[src] = append(adjacency[src], e.Target)
+			}
+		}
+	}
+
+	return detectCyclesDFS(adjacency), nil
+}
+
+// TopologicalSort 对调用图进行拓扑排序
+func (s *MemoryStore) TopologicalSort(ctx context.Context) ([]string, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	adjacency := make(map[string][]string)
+	allNodes := make(map[string]bool)
+	for src, edges := range s.outEdges {
+		for _, e := range edges {
+			if e.Type == EdgeTypeCalls {
+				adjacency[src] = append(adjacency[src], e.Target)
+				allNodes[src] = true
+				allNodes[e.Target] = true
+			}
+		}
+	}
+
+	return topologicalSortKahn(adjacency, allNodes), nil
+}
+
 // containsEdgeType 检查边类型是否在列表中
 func containsEdgeType(types []EdgeType, t EdgeType) bool {
 	for _, et := range types {

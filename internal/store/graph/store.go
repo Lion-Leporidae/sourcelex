@@ -99,6 +99,21 @@ type PathResult struct {
 	Edges []Edge `json:"edges"`
 }
 
+// SubgraphResult 子图查询结果
+type SubgraphResult struct {
+	// Nodes 子图中的节点
+	Nodes []Node `json:"nodes"`
+
+	// Edges 子图中的边
+	Edges []Edge `json:"edges"`
+
+	// CenterID 中心节点 ID
+	CenterID string `json:"center_id"`
+
+	// Depth 深度
+	Depth int `json:"depth"`
+}
+
 // Store 图存储接口
 // 定义了图数据库的基本操作
 // 实现可以是内存存储、NetworkX、Cayley、DGraph 等
@@ -132,6 +147,27 @@ type Store interface {
 
 	// FindPath 查找两个节点之间的路径
 	FindPath(ctx context.Context, sourceID, targetID string) (*PathResult, error)
+
+	// GetAllNodes 获取所有节点
+	GetAllNodes(ctx context.Context) ([]Node, error)
+
+	// GetAllEdges 获取所有边
+	GetAllEdges(ctx context.Context) ([]Edge, error)
+
+	// GetSubgraph 获取以指定节点为中心的子图
+	GetSubgraph(ctx context.Context, id string, depth int) (*SubgraphResult, error)
+
+	// GetNodesByFile 获取指定文件中的所有节点
+	GetNodesByFile(ctx context.Context, filePath string) ([]Node, error)
+
+	// GetNodesByType 获取指定类型的所有节点
+	GetNodesByType(ctx context.Context, nodeType NodeType) ([]Node, error)
+
+	// DetectCycles 检测调用图中的环
+	DetectCycles(ctx context.Context) ([][]string, error)
+
+	// TopologicalSort 对调用图进行拓扑排序
+	TopologicalSort(ctx context.Context) ([]string, error)
 
 	// DeleteNode 删除节点及其所有边
 	DeleteNode(ctx context.Context, id string) error
