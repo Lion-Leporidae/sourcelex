@@ -40,6 +40,21 @@ mcp:
   host: "127.0.0.1"
   port: 8080
 
+# Agent 配置（AI 代码分析助手）
+agent:
+  provider: ""               # openai 或 anthropic（留空则不启用 Agent 对话）
+  
+  # OpenAI / 兼容 API 配置（DeepSeek、Ollama 等）
+  openai:
+    api_key: ""              # OpenAI API Key
+    model: "gpt-4o"          # 模型名称
+    base_url: ""             # 自定义端点（留空默认 OpenAI，DeepSeek 填 https://api.deepseek.com/v1）
+  
+  # Anthropic Claude 配置
+  anthropic:
+    api_key: ""              # Anthropic API Key
+    model: "claude-sonnet-4-20250514"
+
 # 日志配置
 logging:
   level: "info"            # debug, info, warn, error
