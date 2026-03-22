@@ -12,10 +12,12 @@ package store
 import (
 	"context"
 	"fmt"
-	"log"
+	"sort"
+	"strings"
 
 	"github.com/repomind/repomind-go/internal/analyzer/chunker"
 	"github.com/repomind/repomind-go/internal/analyzer/entity"
+	"github.com/repomind/repomind-go/internal/logger"
 	"github.com/repomind/repomind-go/internal/store/graph"
 	"github.com/repomind/repomind-go/internal/store/vector"
 )
@@ -37,6 +39,9 @@ type KnowledgeStore struct {
 
 	// repoPath 仓库路径（用于读取代码内容）
 	repoPath string
+
+	// log 日志器
+	log *logger.Logger
 }
 
 // Config KnowledgeStore 配置
@@ -52,16 +57,24 @@ type Config struct {
 
 	// RepoPath 仓库路径（用于读取代码内容）
 	RepoPath string
+
+	// Log 日志器
+	Log *logger.Logger
 }
 
 // New 创建 KnowledgeStore
 func New(cfg Config) *KnowledgeStore {
+	log := cfg.Log
+	if log == nil {
+		log = logger.NewDefault()
+	}
 	return &KnowledgeStore{
 		vectorStore: cfg.VectorStore,
 		graphStore:  cfg.GraphStore,
 		embedder:    cfg.Embedder,
 		chunker:     chunker.NewSymbolChunker(),
 		repoPath:    cfg.RepoPath,
+		log:         log,
 	}
 }
 
@@ -115,23 +128,23 @@ func (ks *KnowledgeStore) StoreEntities(ctx context.Context, entities []entity.E
 		}
 	}
 
-	// 3. 尝试为每个实体生成嵌入向量
+	// 3. 尝试为每个实体生成嵌入向量（批量处理）
 	if ks.embedder == nil || ks.vectorStore == nil {
 		return nil
 	}
 
-	docs := make([]vector.Document, 0, len(entities))
-	embedFailCount := 0
-	firstError := ""
+	// 构建所有需要嵌入的内容和对应的元数据
+	type embedItem struct {
+		entity  entity.Entity
+		content string
+	}
+	var items []embedItem
 
 	for _, e := range entities {
-		// 构建文档内容（用于向量化）
-		// 优先使用分块内容（包含完整代码）
 		var content string
 		if ch, ok := chunkMap[e.QualifiedName]; ok && ch.Content != "" {
 			content = chunker.BuildEmbeddingContent(ch)
 		} else {
-			// 回退到简单内容（仅签名）
 			content = fmt.Sprintf("[%s] %s\n%s\n%s",
 				string(e.Type),
 				e.QualifiedName,
@@ -139,39 +152,73 @@ func (ks *KnowledgeStore) StoreEntities(ctx context.Context, entities []entity.E
 				e.FilePath,
 			)
 		}
+		items = append(items, embedItem{entity: e, content: content})
+	}
 
-		// 生成嵌入向量
-		vec, err := ks.embedder.Embed(ctx, content)
-		if err != nil {
-			embedFailCount++
-			if firstError == "" {
-				firstError = err.Error()
+	// 分批嵌入（每批最多 32 条，避免 API 限制）
+	const batchSize = 32
+	const maxRetries = 3
+	var docs []vector.Document
+	embedFailCount := 0
+	firstError := ""
+
+	for batchStart := 0; batchStart < len(items); batchStart += batchSize {
+		batchEnd := batchStart + batchSize
+		if batchEnd > len(items) {
+			batchEnd = len(items)
+		}
+		batch := items[batchStart:batchEnd]
+
+		// 收集本批文本
+		texts := make([]string, len(batch))
+		for i, item := range batch {
+			texts[i] = item.content
+		}
+
+		// 带重试的批量嵌入
+		var vectors [][]float32
+		var embedErr error
+		for retry := 0; retry < maxRetries; retry++ {
+			vectors, embedErr = ks.embedder.EmbedBatch(ctx, texts)
+			if embedErr == nil {
+				break
+			}
+			ks.log.Debug("批量嵌入重试", "batch", batchStart/batchSize, "retry", retry+1, "error", embedErr)
+		}
+
+		if embedErr != nil {
+			// 批量失败，回退到逐条嵌入
+			ks.log.Warn("批量嵌入失败，回退到逐条嵌入", "error", embedErr)
+			for _, item := range batch {
+				vec, err := ks.embedder.Embed(ctx, item.content)
+				if err != nil {
+					embedFailCount++
+					if firstError == "" {
+						firstError = err.Error()
+					}
+					continue
+				}
+				docs = append(docs, ks.buildVectorDoc(item.entity, item.content, vec))
 			}
 			continue
 		}
 
-		// 构建向量文档
-		docs = append(docs, vector.Document{
-			ID:      e.QualifiedName,
-			Content: content,
-			Vector:  vec,
-			Metadata: map[string]interface{}{
-				"name":       e.Name,
-				"type":       string(e.Type),
-				"file_path":  e.FilePath,
-				"start_line": e.StartLine,
-				"end_line":   e.EndLine,
-				"language":   e.Language,
-				"signature":  e.Signature,
-			},
-		})
+		// 批量嵌入成功
+		for i, item := range batch {
+			if i < len(vectors) && vectors[i] != nil {
+				docs = append(docs, ks.buildVectorDoc(item.entity, item.content, vectors[i]))
+			} else {
+				embedFailCount++
+			}
+		}
+
+		ks.log.Debug("批量嵌入完成", "batch", batchStart/batchSize+1, "size", len(batch))
 	}
 
-	// 打印嵌入结果统计
 	if embedFailCount > 0 {
-		log.Printf("[WARN] 嵌入失败: %d/%d, 首个错误: %s", embedFailCount, len(entities), firstError)
+		ks.log.Warn("部分实体嵌入失败", "failed", embedFailCount, "total", len(entities), "first_error", firstError)
 	}
-	log.Printf("[INFO] 嵌入成功: %d/%d", len(docs), len(entities))
+	ks.log.Info("嵌入完成", "success", len(docs), "total", len(entities))
 
 	// 存储到向量数据库
 	if len(docs) > 0 {
@@ -181,6 +228,24 @@ func (ks *KnowledgeStore) StoreEntities(ctx context.Context, entities []entity.E
 	}
 
 	return nil
+}
+
+// buildVectorDoc 构建向量文档
+func (ks *KnowledgeStore) buildVectorDoc(e entity.Entity, content string, vec []float32) vector.Document {
+	return vector.Document{
+		ID:      e.QualifiedName,
+		Content: content,
+		Vector:  vec,
+		Metadata: map[string]interface{}{
+			"name":       e.Name,
+			"type":       string(e.Type),
+			"file_path":  e.FilePath,
+			"start_line": e.StartLine,
+			"end_line":   e.EndLine,
+			"language":   e.Language,
+			"signature":  e.Signature,
+		},
+	}
 }
 
 // StoreRelations 存储调用关系
@@ -309,6 +374,70 @@ type StoreStats struct {
 	EdgeCount   int64
 }
 
+// GetSubgraph 获取以指定实体为中心的子图
+func (ks *KnowledgeStore) GetSubgraph(ctx context.Context, entityID string, depth int) (*graph.SubgraphResult, error) {
+	if ks.graphStore == nil {
+		return nil, fmt.Errorf("图存储未初始化")
+	}
+	return ks.graphStore.GetSubgraph(ctx, entityID, depth)
+}
+
+// GetAllNodes 获取所有节点
+func (ks *KnowledgeStore) GetAllNodes(ctx context.Context) ([]graph.Node, error) {
+	if ks.graphStore == nil {
+		return nil, fmt.Errorf("图存储未初始化")
+	}
+	return ks.graphStore.GetAllNodes(ctx)
+}
+
+// GetAllEdges 获取所有边
+func (ks *KnowledgeStore) GetAllEdges(ctx context.Context) ([]graph.Edge, error) {
+	if ks.graphStore == nil {
+		return nil, fmt.Errorf("图存储未初始化")
+	}
+	return ks.graphStore.GetAllEdges(ctx)
+}
+
+// GetNodesByFile 获取指定文件中的所有实体
+func (ks *KnowledgeStore) GetNodesByFile(ctx context.Context, filePath string) ([]graph.Node, error) {
+	if ks.graphStore == nil {
+		return nil, fmt.Errorf("图存储未初始化")
+	}
+	return ks.graphStore.GetNodesByFile(ctx, filePath)
+}
+
+// GetNodesByType 获取指定类型的所有实体
+func (ks *KnowledgeStore) GetNodesByType(ctx context.Context, nodeType graph.NodeType) ([]graph.Node, error) {
+	if ks.graphStore == nil {
+		return nil, fmt.Errorf("图存储未初始化")
+	}
+	return ks.graphStore.GetNodesByType(ctx, nodeType)
+}
+
+// FindPath 查找两个实体之间的路径
+func (ks *KnowledgeStore) FindPath(ctx context.Context, sourceID, targetID string) (*graph.PathResult, error) {
+	if ks.graphStore == nil {
+		return nil, fmt.Errorf("图存储未初始化")
+	}
+	return ks.graphStore.FindPath(ctx, sourceID, targetID)
+}
+
+// DetectCycles 检测调用图中的循环依赖
+func (ks *KnowledgeStore) DetectCycles(ctx context.Context) ([][]string, error) {
+	if ks.graphStore == nil {
+		return nil, fmt.Errorf("图存储未初始化")
+	}
+	return ks.graphStore.DetectCycles(ctx)
+}
+
+// TopologicalSort 获取调用图的拓扑排序
+func (ks *KnowledgeStore) TopologicalSort(ctx context.Context) ([]string, error) {
+	if ks.graphStore == nil {
+		return nil, fmt.Errorf("图存储未初始化")
+	}
+	return ks.graphStore.TopologicalSort(ctx)
+}
+
 // Close 关闭所有存储
 func (ks *KnowledgeStore) Close() error {
 	var lastErr error
@@ -326,4 +455,290 @@ func (ks *KnowledgeStore) Close() error {
 	}
 
 	return lastErr
+}
+
+// ========== 紧凑调用链输出 ==========
+
+// CallChainCompact 生成紧凑的调用链文本表示
+// 设计目标：用最少的 token 表达调用链信息，方便 AI 助手理解代码结构
+//
+// depth=1 输出示例（~20 tokens vs JSON 的 500+ tokens）:
+//
+//	SemanticSearch (store/knowledge.go:278)
+//	  → Embed, Search
+//	  ← handleSemanticSearch, HybridSearch
+//
+// depth=2 输出示例（树形展开）:
+//
+//	SemanticSearch (store/knowledge.go:278)
+//	  调用:
+//	    → Embed (vector/hf.go:45)
+//	    → Search (vector/chromem.go:23)
+//	  被调用:
+//	    ← handleSemanticSearch (mcp/handlers.go:190)
+//	    ← HybridSearch (store/rag.go:303)
+//	      ← ContextSearch (store/rag.go:347)
+func (ks *KnowledgeStore) CallChainCompact(ctx context.Context, entityID string, depth int) (string, error) {
+	if ks.graphStore == nil {
+		return "", fmt.Errorf("图存储未初始化")
+	}
+	if depth <= 0 {
+		depth = 1
+	}
+
+	node, err := ks.graphStore.GetNode(ctx, entityID)
+	if err != nil {
+		return "", err
+	}
+
+	var b strings.Builder
+	b.WriteString(fmt.Sprintf("%s (%s:%d)\n", node.ID, shortPath(node.FilePath), node.StartLine))
+
+	callees, _ := ks.graphStore.GetCalleesOf(ctx, entityID, depth)
+	callers, _ := ks.graphStore.GetCallersOf(ctx, entityID, depth)
+
+	if depth == 1 {
+		if len(callees) > 0 {
+			names := make([]string, len(callees))
+			for i, c := range callees {
+				names[i] = c.Name
+			}
+			b.WriteString(fmt.Sprintf("  → %s\n", strings.Join(names, ", ")))
+		}
+		if len(callers) > 0 {
+			names := make([]string, len(callers))
+			for i, c := range callers {
+				names[i] = c.Name
+			}
+			b.WriteString(fmt.Sprintf("  ← %s\n", strings.Join(names, ", ")))
+		}
+	} else {
+		subgraph, err := ks.graphStore.GetSubgraph(ctx, entityID, depth)
+		if err != nil {
+			return b.String(), nil
+		}
+
+		calleesAdj := make(map[string][]string)
+		callersAdj := make(map[string][]string)
+		nodeMap := make(map[string]*graph.Node)
+		for i := range subgraph.Nodes {
+			nodeMap[subgraph.Nodes[i].ID] = &subgraph.Nodes[i]
+		}
+		for _, e := range subgraph.Edges {
+			if e.Type == graph.EdgeTypeCalls {
+				calleesAdj[e.Source] = append(calleesAdj[e.Source], e.Target)
+				callersAdj[e.Target] = append(callersAdj[e.Target], e.Source)
+			}
+		}
+
+		if targets := calleesAdj[entityID]; len(targets) > 0 {
+			b.WriteString("  调用:\n")
+			writeCallTreeLines(&b, targets, calleesAdj, nodeMap, "    ", depth-1, make(map[string]bool), "→")
+		}
+		if sources := callersAdj[entityID]; len(sources) > 0 {
+			b.WriteString("  被调用:\n")
+			writeCallTreeLines(&b, sources, callersAdj, nodeMap, "    ", depth-1, make(map[string]bool), "←")
+		}
+	}
+
+	return b.String(), nil
+}
+
+// writeCallTreeLines 递归写入调用树的每一行
+func writeCallTreeLines(b *strings.Builder, ids []string, adj map[string][]string, nodeMap map[string]*graph.Node, indent string, remainDepth int, visited map[string]bool, arrow string) {
+	for _, id := range ids {
+		if visited[id] {
+			continue
+		}
+		visited[id] = true
+
+		if n, ok := nodeMap[id]; ok {
+			b.WriteString(fmt.Sprintf("%s%s %s (%s:%d)\n", indent, arrow, n.Name, shortPath(n.FilePath), n.StartLine))
+		} else {
+			b.WriteString(fmt.Sprintf("%s%s %s\n", indent, arrow, id))
+		}
+
+		if remainDepth > 0 {
+			if children := adj[id]; len(children) > 0 {
+				writeCallTreeLines(b, children, adj, nodeMap, indent+"  ", remainDepth-1, visited, arrow)
+			}
+		}
+	}
+}
+
+// CallGraphSummary 生成完整调用图的紧凑文本摘要
+// 按文件分组的邻接表格式，一次请求获取全部调用关系
+//
+// 输出示例（100 个函数约 1000 tokens，JSON 需要 10000+）:
+//
+//	# 调用图 (45 个函数, 62 条调用)
+//
+//	## mcp/handlers.go
+//	handleSemanticSearch → SemanticSearch
+//	handleGetCallMap → GetCallersOf, GetCalleesOf
+//
+//	## store/knowledge.go
+//	SemanticSearch → Embed, Search
+func (ks *KnowledgeStore) CallGraphSummary(ctx context.Context, fileFilter string) (string, error) {
+	if ks.graphStore == nil {
+		return "", fmt.Errorf("图存储未初始化")
+	}
+
+	var nodes []graph.Node
+	var err error
+	if fileFilter != "" {
+		nodes, err = ks.graphStore.GetNodesByFile(ctx, fileFilter)
+	} else {
+		nodes, err = ks.graphStore.GetAllNodes(ctx)
+	}
+	if err != nil {
+		return "", err
+	}
+
+	edges, err := ks.graphStore.GetAllEdges(ctx)
+	if err != nil {
+		return "", err
+	}
+
+	nodeMap := make(map[string]*graph.Node)
+	nodeSet := make(map[string]bool)
+	for i := range nodes {
+		nodeMap[nodes[i].ID] = &nodes[i]
+		nodeSet[nodes[i].ID] = true
+	}
+
+	// 构建去重的邻接表: sourceID → {targetName: true}
+	sourceCallees := make(map[string]map[string]bool)
+	for _, e := range edges {
+		if e.Type != graph.EdgeTypeCalls {
+			continue
+		}
+		if nodeMap[e.Source] == nil {
+			continue
+		}
+		if fileFilter != "" && !nodeSet[e.Source] {
+			continue
+		}
+		if sourceCallees[e.Source] == nil {
+			sourceCallees[e.Source] = make(map[string]bool)
+		}
+		targetName := e.Target
+		if tn, ok := nodeMap[e.Target]; ok {
+			targetName = tn.Name
+		}
+		sourceCallees[e.Source][targetName] = true
+	}
+
+	// 按文件分组，文件内按行号排序
+	sort.Slice(nodes, func(i, j int) bool {
+		if nodes[i].FilePath != nodes[j].FilePath {
+			return nodes[i].FilePath < nodes[j].FilePath
+		}
+		return nodes[i].StartLine < nodes[j].StartLine
+	})
+
+	fileGroups := make(map[string][]string)
+	var fileOrder []string
+
+	for _, n := range nodes {
+		targets := sourceCallees[n.ID]
+		if len(targets) == 0 {
+			continue
+		}
+		fp := shortPath(n.FilePath)
+		if _, exists := fileGroups[fp]; !exists {
+			fileOrder = append(fileOrder, fp)
+		}
+		targetList := make([]string, 0, len(targets))
+		for t := range targets {
+			targetList = append(targetList, t)
+		}
+		sort.Strings(targetList)
+
+		entry := fmt.Sprintf("%s → %s", n.Name, strings.Join(targetList, ", "))
+		fileGroups[fp] = append(fileGroups[fp], entry)
+	}
+
+	var b strings.Builder
+	callCount := 0
+	for _, targets := range sourceCallees {
+		callCount += len(targets)
+	}
+	b.WriteString(fmt.Sprintf("# 调用图 (%d 个函数, %d 条调用)\n\n", len(nodes), callCount))
+
+	for _, fp := range fileOrder {
+		entries := fileGroups[fp]
+		b.WriteString(fmt.Sprintf("## %s\n", fp))
+		for _, entry := range entries {
+			b.WriteString(entry + "\n")
+		}
+		b.WriteString("\n")
+	}
+
+	return b.String(), nil
+}
+
+// BuildCallChainSection 为 RAG 上下文生成紧凑的调用关系段落
+// 给定一组实体 ID，生成它们之间的调用关系摘要
+func (ks *KnowledgeStore) BuildCallChainSection(ctx context.Context, entityIDs []string) string {
+	if ks.graphStore == nil || len(entityIDs) == 0 {
+		return ""
+	}
+
+	var lines []string
+	seen := make(map[string]bool)
+
+	for _, id := range entityIDs {
+		callees, _ := ks.graphStore.GetCalleesOf(ctx, id, 1)
+		callers, _ := ks.graphStore.GetCallersOf(ctx, id, 1)
+
+		node, err := ks.graphStore.GetNode(ctx, id)
+		if err != nil {
+			continue
+		}
+
+		if len(callees) > 0 {
+			names := make([]string, len(callees))
+			for i, c := range callees {
+				names[i] = c.Name
+			}
+			line := fmt.Sprintf("%s → %s", node.Name, strings.Join(names, ", "))
+			if !seen[line] {
+				lines = append(lines, line)
+				seen[line] = true
+			}
+		}
+
+		if len(callers) > 0 {
+			names := make([]string, len(callers))
+			for i, c := range callers {
+				names[i] = c.Name
+			}
+			line := fmt.Sprintf("%s ← %s", node.Name, strings.Join(names, ", "))
+			if !seen[line] {
+				lines = append(lines, line)
+				seen[line] = true
+			}
+		}
+	}
+
+	if len(lines) == 0 {
+		return ""
+	}
+
+	var b strings.Builder
+	b.WriteString("---\n## 调用关系\n")
+	for _, line := range lines {
+		b.WriteString(line + "\n")
+	}
+	return b.String()
+}
+
+// shortPath 截取路径最后两级，减少 token 消耗
+func shortPath(p string) string {
+	parts := strings.Split(p, "/")
+	if len(parts) <= 2 {
+		return p
+	}
+	return strings.Join(parts[len(parts)-2:], "/")
 }
