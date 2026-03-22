@@ -2,17 +2,24 @@ package cmd
 
 import (
 	"context"
+	"encoding/json"
+	"fmt"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"syscall"
 	"time"
 
 	"github.com/spf13/cobra"
 
+	"github.com/repomind/repomind-go/internal/agent"
+	"github.com/repomind/repomind-go/internal/agent/llm"
+	repogit "github.com/repomind/repomind-go/internal/git"
 	"github.com/repomind/repomind-go/internal/mcp"
 	"github.com/repomind/repomind-go/internal/store"
 	"github.com/repomind/repomind-go/internal/store/graph"
 	"github.com/repomind/repomind-go/internal/store/vector"
+	"github.com/repomind/repomind-go/internal/web"
 )
 
 var (
@@ -74,24 +81,126 @@ func runServe(cmd *cobra.Command, args []string) error {
 		}
 	}
 
-	// 初始化图存储（内存）
-	graphStore := graph.NewMemoryStore()
-	log.Info("内存图存储已初始化")
+	// 初始化向量存储（加载已持久化的 chromem 数据）
+	var vectorStore vector.Store
+	vectorPath := filepath.Join(cfg.Paths.DataDir, "vectors")
+	if _, err := os.Stat(vectorPath); err == nil {
+		vs, err := vector.NewChromemStore(vector.ChromemConfig{
+			PersistPath:    vectorPath,
+			CollectionName: "code_vectors",
+			VectorDim:      cfg.VectorStore.HuggingFace.Dimension,
+		})
+		if err != nil {
+			log.Warn("加载向量存储失败，将使用空存储", "error", err)
+		} else {
+			vectorStore = vs
+			log.Info("向量存储加载完成", "path", vectorPath)
+		}
+	} else {
+		log.Warn("向量存储目录不存在，请先运行 store 命令", "path", vectorPath)
+	}
+
+	// 初始化图存储（加载已持久化的 SQLite 数据）
+	var graphStore graph.Store
+	graphPath := filepath.Join(cfg.Paths.DataDir, "graph.db")
+	if _, err := os.Stat(graphPath); err == nil {
+		gs, err := graph.NewSQLiteStore(graph.SQLiteConfig{
+			DBPath: graphPath,
+		})
+		if err != nil {
+			log.Warn("加载 SQLite 图存储失败，将使用内存图存储", "error", err)
+			graphStore = graph.NewMemoryStore()
+		} else {
+			graphStore = gs
+			log.Info("SQLite 图存储加载完成", "path", graphPath)
+		}
+	} else {
+		log.Warn("图存储文件不存在，请先运行 store 命令，将使用空内存图存储", "path", graphPath)
+		graphStore = graph.NewMemoryStore()
+	}
 
 	// 创建知识存储
-	// 注意: 向量存储需要 Qdrant 服务运行，这里暂时只使用图存储
 	knowledgeStore := store.New(store.Config{
-		GraphStore: graphStore,
-		Embedder:   embedder,
+		VectorStore: vectorStore,
+		GraphStore:  graphStore,
+		Embedder:    embedder,
+		Log:         log,
 	})
+	defer func() {
+		log.Info("正在关闭存储连接...")
+		if err := knowledgeStore.Close(); err != nil {
+			log.Error("关闭存储连接失败", "error", err)
+		}
+	}()
+
+	// 加载 Git 仓库（用于历史分析）
+	var gitRepo *repogit.Repository
+	metaPath := filepath.Join(cfg.Paths.DataDir, "metadata.json")
+	if metaData, err := os.ReadFile(metaPath); err == nil {
+		var meta RepoMetadata
+		if err := json.Unmarshal(metaData, &meta); err == nil && meta.RepoPath != "" {
+			if repo, err := repogit.Open(meta.RepoPath); err == nil {
+				gitRepo = repo
+				log.Info("Git 仓库已加载（支持历史分析）", "path", meta.RepoPath)
+			} else {
+				log.Warn("打开 Git 仓库失败，历史分析功能不可用", "path", meta.RepoPath, "error", err)
+			}
+		}
+	} else {
+		log.Warn("未找到仓库元数据，历史分析功能不可用。请先运行 store 命令")
+	}
 
 	// 创建 MCP 服务器
 	server := mcp.New(mcp.Config{
-		Host:  serveHost,
-		Port:  servePort,
+		Host:    serveHost,
+		Port:    servePort,
+		Store:   knowledgeStore,
+		GitRepo: gitRepo,
+		Log:     log,
+	})
+
+	// 初始化 Agent（如果配置了 LLM Provider）
+	var codeAgent *agent.CodeAgent
+	switch cfg.Agent.Provider {
+	case "openai":
+		provider := llm.NewOpenAIProvider(llm.OpenAIConfig{
+			APIKey:  cfg.Agent.OpenAI.APIKey,
+			Model:   cfg.Agent.OpenAI.Model,
+			BaseURL: cfg.Agent.OpenAI.BaseURL,
+		})
+		codeAgent = agent.New(agent.Config{
+			Provider: provider,
+			Store:    knowledgeStore,
+			Log:      log,
+		})
+		log.Info("Agent 已初始化", "provider", "openai", "model", cfg.Agent.OpenAI.Model)
+	case "anthropic":
+		provider := llm.NewAnthropicProvider(llm.AnthropicConfig{
+			APIKey: cfg.Agent.Anthropic.APIKey,
+			Model:  cfg.Agent.Anthropic.Model,
+		})
+		codeAgent = agent.New(agent.Config{
+			Provider: provider,
+			Store:    knowledgeStore,
+			Log:      log,
+		})
+		log.Info("Agent 已初始化", "provider", "anthropic", "model", cfg.Agent.Anthropic.Model)
+	default:
+		if cfg.Agent.Provider != "" {
+			log.Warn("未知的 Agent Provider，Agent 功能未启用", "provider", cfg.Agent.Provider)
+		} else {
+			log.Info("Agent 未配置 LLM Provider，对话功能不可用，图谱和统计仍可使用")
+		}
+	}
+
+	// 注册 Web UI 和 Agent API 路由
+	webHandler := web.NewHandler(web.Config{
+		Agent: codeAgent,
 		Store: knowledgeStore,
 		Log:   log,
 	})
+	webHandler.SetupRoutes(server.Router())
+	log.Info("Web UI 已启动", "url", fmt.Sprintf("http://%s:%d", serveHost, servePort))
 
 	// 优雅关闭处理
 	// 捕获 SIGINT 和 SIGTERM 信号
