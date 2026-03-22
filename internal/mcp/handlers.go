@@ -3,10 +3,14 @@
 package mcp
 
 import (
+	"fmt"
 	"net/http"
 	"strconv"
 
 	"github.com/gin-gonic/gin"
+
+	"github.com/repomind/repomind-go/internal/store"
+	"github.com/repomind/repomind-go/internal/store/graph"
 )
 
 // ========== 请求/响应结构体 ==========
@@ -22,6 +26,26 @@ type SemanticSearchRequest struct {
 
 	// Filter 过滤条件
 	Filter map[string]interface{} `json:"filter,omitempty"`
+}
+
+// HybridSearchRequest 混合搜索请求
+type HybridSearchRequest struct {
+	Query   string                 `json:"query" binding:"required"`
+	TopK    int                    `json:"top_k,omitempty"`
+	Filters map[string]interface{} `json:"filters,omitempty"`
+}
+
+// RAGContextRequest RAG 上下文请求
+type RAGContextRequest struct {
+	Query            string                 `json:"query" binding:"required"`
+	TopK             int                    `json:"top_k,omitempty"`
+	MinScore         float32                `json:"min_score,omitempty"`
+	IncludeCallGraph bool                   `json:"include_call_graph,omitempty"`
+	CallGraphDepth   int                    `json:"call_graph_depth,omitempty"`
+	IncludeFileCtx   bool                   `json:"include_file_context,omitempty"`
+	EnableReranking  bool                   `json:"enable_reranking,omitempty"`
+	Filters          map[string]interface{} `json:"filters,omitempty"`
+	MaxContextLength int                    `json:"max_context_length,omitempty"`
 }
 
 // SearchResult 搜索结果项
@@ -72,6 +96,57 @@ type APIResponse struct {
 	Success bool        `json:"success"`
 	Data    interface{} `json:"data,omitempty"`
 	Error   string      `json:"error,omitempty"`
+}
+
+// FunctionGraphResponse 功能图谱响应
+type FunctionGraphResponse struct {
+	Nodes []EntityInfo `json:"nodes"`
+	Edges []EdgeInfo   `json:"edges"`
+	Stats GraphStats   `json:"stats"`
+}
+
+// EdgeInfo 边信息
+type EdgeInfo struct {
+	Source string `json:"source"`
+	Target string `json:"target"`
+	Type   string `json:"type"`
+}
+
+// GraphStats 图统计信息
+type GraphStats struct {
+	NodeCount  int `json:"node_count"`
+	EdgeCount  int `json:"edge_count"`
+	CycleCount int `json:"cycle_count,omitempty"`
+}
+
+// SubgraphResponse 子图响应
+type SubgraphResponse struct {
+	CenterID string       `json:"center_id"`
+	Depth    int          `json:"depth"`
+	Nodes    []EntityInfo `json:"nodes"`
+	Edges    []EdgeInfo   `json:"edges"`
+}
+
+// CallChainResponse 紧凑调用链响应
+type CallChainResponse struct {
+	EntityID string `json:"entity_id"`
+	Depth    int    `json:"depth"`
+	Text     string `json:"text"`
+}
+
+// GraphSummaryResponse 调用图摘要响应
+type GraphSummaryResponse struct {
+	Text      string `json:"text"`
+	NodeCount int    `json:"node_count"`
+	EdgeCount int    `json:"edge_count"`
+}
+
+// PathResponse 路径响应
+type PathResponse struct {
+	Source string     `json:"source"`
+	Target string     `json:"target"`
+	Path   []string   `json:"path"`
+	Edges  []EdgeInfo `json:"edges"`
 }
 
 // ========== 处理器方法 ==========
@@ -250,15 +325,15 @@ func (s *Server) handleGetCallMap(c *gin.Context) {
 	}
 
 	// 获取调用者
-	callers, err := s.store.GetCallersOf(c.Request.Context(), entityID, depth)
-	if err != nil {
-		s.log.Debug("获取调用者失败", "error", err)
+	callers, callerErr := s.store.GetCallersOf(c.Request.Context(), entityID, depth)
+	if callerErr != nil {
+		s.log.Debug("获取调用者失败", "error", callerErr)
 	}
 
 	// 获取被调用者
-	callees, err := s.store.GetCalleesOf(c.Request.Context(), entityID, depth)
-	if err != nil {
-		s.log.Debug("获取被调用者失败", "error", err)
+	callees, calleeErr := s.store.GetCalleesOf(c.Request.Context(), entityID, depth)
+	if calleeErr != nil {
+		s.log.Debug("获取被调用者失败", "error", calleeErr)
 	}
 
 	// 转换结果
@@ -387,5 +462,873 @@ func (s *Server) handleGetCallees(c *gin.Context) {
 	c.JSON(http.StatusOK, APIResponse{
 		Success: true,
 		Data:    infos,
+	})
+}
+
+// handleGetFunctionGraph 获取完整功能图谱
+// GET /api/v1/graph/function?type=function&file=xxx
+func (s *Server) handleGetFunctionGraph(c *gin.Context) {
+	if s.store == nil {
+		c.JSON(http.StatusServiceUnavailable, APIResponse{
+			Success: false,
+			Error:   "知识库未初始化",
+		})
+		return
+	}
+
+	nodeType := c.Query("type")
+	filePath := c.Query("file")
+
+	var nodes []graph.Node
+	var err error
+
+	if filePath != "" {
+		nodes, err = s.store.GetNodesByFile(c.Request.Context(), filePath)
+	} else if nodeType != "" {
+		nodes, err = s.store.GetNodesByType(c.Request.Context(), graph.NodeType(nodeType))
+	} else {
+		nodes, err = s.store.GetAllNodes(c.Request.Context())
+	}
+
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, APIResponse{
+			Success: false,
+			Error:   err.Error(),
+		})
+		return
+	}
+
+	edges, err := s.store.GetAllEdges(c.Request.Context())
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, APIResponse{
+			Success: false,
+			Error:   err.Error(),
+		})
+		return
+	}
+
+	nodeSet := make(map[string]bool)
+	for _, n := range nodes {
+		nodeSet[n.ID] = true
+	}
+
+	var filteredEdges []EdgeInfo
+	for _, e := range edges {
+		if nodeSet[e.Source] && nodeSet[e.Target] {
+			filteredEdges = append(filteredEdges, EdgeInfo{
+				Source: e.Source,
+				Target: e.Target,
+				Type:   string(e.Type),
+			})
+		}
+	}
+
+	nodeInfos := make([]EntityInfo, len(nodes))
+	for i, n := range nodes {
+		nodeInfos[i] = EntityInfo{
+			ID:        n.ID,
+			Name:      n.Name,
+			Type:      string(n.Type),
+			FilePath:  n.FilePath,
+			StartLine: n.StartLine,
+			EndLine:   n.EndLine,
+			Signature: n.Signature,
+		}
+	}
+
+	c.JSON(http.StatusOK, APIResponse{
+		Success: true,
+		Data: FunctionGraphResponse{
+			Nodes: nodeInfos,
+			Edges: filteredEdges,
+			Stats: GraphStats{
+				NodeCount: len(nodeInfos),
+				EdgeCount: len(filteredEdges),
+			},
+		},
+	})
+}
+
+// handleGetSubgraph 获取子图
+// GET /api/v1/graph/subgraph/:id?depth=2
+func (s *Server) handleGetSubgraph(c *gin.Context) {
+	entityID := c.Param("id")
+	depthStr := c.DefaultQuery("depth", "2")
+	depth, _ := strconv.Atoi(depthStr)
+	if depth <= 0 {
+		depth = 2
+	}
+
+	if s.store == nil {
+		c.JSON(http.StatusServiceUnavailable, APIResponse{
+			Success: false,
+			Error:   "知识库未初始化",
+		})
+		return
+	}
+
+	subgraph, err := s.store.GetSubgraph(c.Request.Context(), entityID, depth)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, APIResponse{
+			Success: false,
+			Error:   err.Error(),
+		})
+		return
+	}
+
+	nodeInfos := make([]EntityInfo, len(subgraph.Nodes))
+	for i, n := range subgraph.Nodes {
+		nodeInfos[i] = EntityInfo{
+			ID:        n.ID,
+			Name:      n.Name,
+			Type:      string(n.Type),
+			FilePath:  n.FilePath,
+			StartLine: n.StartLine,
+			EndLine:   n.EndLine,
+			Signature: n.Signature,
+		}
+	}
+
+	edgeInfos := make([]EdgeInfo, len(subgraph.Edges))
+	for i, e := range subgraph.Edges {
+		edgeInfos[i] = EdgeInfo{
+			Source: e.Source,
+			Target: e.Target,
+			Type:   string(e.Type),
+		}
+	}
+
+	c.JSON(http.StatusOK, APIResponse{
+		Success: true,
+		Data: SubgraphResponse{
+			CenterID: entityID,
+			Depth:    depth,
+			Nodes:    nodeInfos,
+			Edges:    edgeInfos,
+		},
+	})
+}
+
+// handleFindPath 查找路径
+// GET /api/v1/graph/path?from=xxx&to=yyy
+func (s *Server) handleFindPath(c *gin.Context) {
+	sourceID := c.Query("from")
+	targetID := c.Query("to")
+
+	if sourceID == "" || targetID == "" {
+		c.JSON(http.StatusBadRequest, APIResponse{
+			Success: false,
+			Error:   "参数 from 和 to 不能为空",
+		})
+		return
+	}
+
+	if s.store == nil {
+		c.JSON(http.StatusServiceUnavailable, APIResponse{
+			Success: false,
+			Error:   "知识库未初始化",
+		})
+		return
+	}
+
+	result, err := s.store.FindPath(c.Request.Context(), sourceID, targetID)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, APIResponse{
+			Success: false,
+			Error:   err.Error(),
+		})
+		return
+	}
+
+	if result == nil {
+		c.JSON(http.StatusNotFound, APIResponse{
+			Success: false,
+			Error:   fmt.Sprintf("没有找到从 %s 到 %s 的路径", sourceID, targetID),
+		})
+		return
+	}
+
+	edgeInfos := make([]EdgeInfo, len(result.Edges))
+	for i, e := range result.Edges {
+		edgeInfos[i] = EdgeInfo{
+			Source: e.Source,
+			Target: e.Target,
+			Type:   string(e.Type),
+		}
+	}
+
+	c.JSON(http.StatusOK, APIResponse{
+		Success: true,
+		Data: PathResponse{
+			Source: sourceID,
+			Target: targetID,
+			Path:   result.Path,
+			Edges:  edgeInfos,
+		},
+	})
+}
+
+// handleDetectCycles 检测循环依赖
+// GET /api/v1/graph/cycles
+func (s *Server) handleDetectCycles(c *gin.Context) {
+	if s.store == nil {
+		c.JSON(http.StatusServiceUnavailable, APIResponse{
+			Success: false,
+			Error:   "知识库未初始化",
+		})
+		return
+	}
+
+	cycles, err := s.store.DetectCycles(c.Request.Context())
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, APIResponse{
+			Success: false,
+			Error:   err.Error(),
+		})
+		return
+	}
+
+	c.JSON(http.StatusOK, APIResponse{
+		Success: true,
+		Data: gin.H{
+			"cycles":      cycles,
+			"cycle_count": len(cycles),
+		},
+	})
+}
+
+// handleTopologicalSort 获取拓扑排序
+// GET /api/v1/graph/topo-sort
+func (s *Server) handleTopologicalSort(c *gin.Context) {
+	if s.store == nil {
+		c.JSON(http.StatusServiceUnavailable, APIResponse{
+			Success: false,
+			Error:   "知识库未初始化",
+		})
+		return
+	}
+
+	sorted, err := s.store.TopologicalSort(c.Request.Context())
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, APIResponse{
+			Success: false,
+			Error:   err.Error(),
+		})
+		return
+	}
+
+	c.JSON(http.StatusOK, APIResponse{
+		Success: true,
+		Data: gin.H{
+			"sorted":     sorted,
+			"node_count": len(sorted),
+		},
+	})
+}
+
+// handleHybridSearch 混合搜索（向量 + 关键词重排序）
+// POST /api/v1/search/hybrid
+func (s *Server) handleHybridSearch(c *gin.Context) {
+	var req HybridSearchRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, APIResponse{
+			Success: false,
+			Error:   "无效的请求参数: " + err.Error(),
+		})
+		return
+	}
+
+	if s.store == nil {
+		c.JSON(http.StatusServiceUnavailable, APIResponse{
+			Success: false,
+			Error:   "知识库未初始化",
+		})
+		return
+	}
+
+	topK := req.TopK
+	if topK <= 0 {
+		topK = 10
+	}
+
+	results, err := s.store.HybridSearch(c.Request.Context(), req.Query, topK, req.Filters)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, APIResponse{
+			Success: false,
+			Error:   err.Error(),
+		})
+		return
+	}
+
+	searchResults := make([]SearchResult, len(results))
+	for i, r := range results {
+		searchResults[i] = SearchResult{
+			EntityID: r.EntityID,
+			Score:    r.Score,
+			Metadata: r.Metadata,
+		}
+		if name, ok := r.Metadata["name"].(string); ok {
+			searchResults[i].Name = name
+		}
+		if t, ok := r.Metadata["type"].(string); ok {
+			searchResults[i].Type = t
+		}
+		if fp, ok := r.Metadata["file_path"].(string); ok {
+			searchResults[i].FilePath = fp
+		}
+	}
+
+	c.JSON(http.StatusOK, APIResponse{
+		Success: true,
+		Data:    searchResults,
+	})
+}
+
+// handleContextSearch 上下文感知搜索
+// POST /api/v1/search/context
+func (s *Server) handleContextSearch(c *gin.Context) {
+	var req HybridSearchRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, APIResponse{
+			Success: false,
+			Error:   "无效的请求参数: " + err.Error(),
+		})
+		return
+	}
+
+	if s.store == nil {
+		c.JSON(http.StatusServiceUnavailable, APIResponse{
+			Success: false,
+			Error:   "知识库未初始化",
+		})
+		return
+	}
+
+	topK := req.TopK
+	if topK <= 0 {
+		topK = 10
+	}
+
+	results, err := s.store.ContextSearch(c.Request.Context(), req.Query, topK)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, APIResponse{
+			Success: false,
+			Error:   err.Error(),
+		})
+		return
+	}
+
+	searchResults := make([]SearchResult, len(results))
+	for i, r := range results {
+		searchResults[i] = SearchResult{
+			EntityID: r.EntityID,
+			Score:    r.Score,
+			Metadata: r.Metadata,
+		}
+		if name, ok := r.Metadata["name"].(string); ok {
+			searchResults[i].Name = name
+		}
+		if t, ok := r.Metadata["type"].(string); ok {
+			searchResults[i].Type = t
+		}
+		if fp, ok := r.Metadata["file_path"].(string); ok {
+			searchResults[i].FilePath = fp
+		}
+	}
+
+	c.JSON(http.StatusOK, APIResponse{
+		Success: true,
+		Data:    searchResults,
+	})
+}
+
+// handleGetCallChain 获取紧凑调用链（token 最优格式）
+// GET /api/v1/callchain/:id?depth=2
+//
+// 返回紧凑文本格式的调用链，比 JSON 节省 95% 的 token
+// depth=1 时输出一行式摘要，depth>1 时输出树形展开
+func (s *Server) handleGetCallChain(c *gin.Context) {
+	entityID := c.Param("id")
+	depthStr := c.DefaultQuery("depth", "1")
+	depth, _ := strconv.Atoi(depthStr)
+	if depth <= 0 {
+		depth = 1
+	}
+
+	if s.store == nil {
+		c.JSON(http.StatusServiceUnavailable, APIResponse{
+			Success: false,
+			Error:   "知识库未初始化",
+		})
+		return
+	}
+
+	text, err := s.store.CallChainCompact(c.Request.Context(), entityID, depth)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, APIResponse{
+			Success: false,
+			Error:   err.Error(),
+		})
+		return
+	}
+
+	c.JSON(http.StatusOK, APIResponse{
+		Success: true,
+		Data: CallChainResponse{
+			EntityID: entityID,
+			Depth:    depth,
+			Text:     text,
+		},
+	})
+}
+
+// handleGetGraphSummary 获取完整调用图的紧凑摘要
+// GET /api/v1/graph/summary?file=xxx
+//
+// 返回按文件分组的邻接表格式调用图，一次请求了解全部调用关系
+// 100 个函数约 1000 tokens（JSON 需要 10000+）
+func (s *Server) handleGetGraphSummary(c *gin.Context) {
+	if s.store == nil {
+		c.JSON(http.StatusServiceUnavailable, APIResponse{
+			Success: false,
+			Error:   "知识库未初始化",
+		})
+		return
+	}
+
+	fileFilter := c.Query("file")
+
+	text, err := s.store.CallGraphSummary(c.Request.Context(), fileFilter)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, APIResponse{
+			Success: false,
+			Error:   err.Error(),
+		})
+		return
+	}
+
+	stats, _ := s.store.Stats(c.Request.Context())
+	nodeCount := 0
+	edgeCount := 0
+	if stats != nil {
+		nodeCount = int(stats.NodeCount)
+		edgeCount = int(stats.EdgeCount)
+	}
+
+	c.JSON(http.StatusOK, APIResponse{
+		Success: true,
+		Data: GraphSummaryResponse{
+			Text:      text,
+			NodeCount: nodeCount,
+			EdgeCount: edgeCount,
+		},
+	})
+}
+
+// handleRAGContext 获取 RAG 上下文
+// POST /api/v1/rag/context
+func (s *Server) handleRAGContext(c *gin.Context) {
+	var req RAGContextRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, APIResponse{
+			Success: false,
+			Error:   "无效的请求参数: " + err.Error(),
+		})
+		return
+	}
+
+	if s.store == nil {
+		c.JSON(http.StatusServiceUnavailable, APIResponse{
+			Success: false,
+			Error:   "知识库未初始化",
+		})
+		return
+	}
+
+	ragReq := store.RAGRequest{
+		Query:            req.Query,
+		TopK:             req.TopK,
+		MinScore:         req.MinScore,
+		IncludeCallGraph: req.IncludeCallGraph,
+		CallGraphDepth:   req.CallGraphDepth,
+		IncludeFileContext: req.IncludeFileCtx,
+		EnableReranking:  req.EnableReranking,
+		Filters:          req.Filters,
+		MaxContextLength: req.MaxContextLength,
+	}
+
+	result, err := s.store.RAGPipeline(c.Request.Context(), ragReq)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, APIResponse{
+			Success: false,
+			Error:   err.Error(),
+		})
+		return
+	}
+
+	c.JSON(http.StatusOK, APIResponse{
+		Success: true,
+		Data:    result,
+	})
+}
+
+// ========== 历史分析处理器 ==========
+
+// CommitInfoResponse 提交信息响应
+type CommitInfoResponse struct {
+	Hash      string                `json:"hash"`
+	ShortHash string                `json:"short_hash"`
+	Author    string                `json:"author"`
+	Email     string                `json:"email"`
+	Message   string                `json:"message"`
+	Timestamp time.Time             `json:"timestamp"`
+	Files     []FileChangeResponse  `json:"files,omitempty"`
+}
+
+// FileChangeResponse 文件变更响应
+type FileChangeResponse struct {
+	Path      string `json:"path"`
+	OldPath   string `json:"old_path,omitempty"`
+	Status    string `json:"status"`
+	Additions int    `json:"additions"`
+	Deletions int    `json:"deletions"`
+}
+
+// FileHistoryResponse 文件历史响应
+type FileHistoryResponse struct {
+	Path    string               `json:"path"`
+	Entries []FileHistoryItem    `json:"entries"`
+}
+
+// FileHistoryItem 文件历史条目
+type FileHistoryItem struct {
+	Commit CommitInfoResponse `json:"commit"`
+	Change FileChangeResponse `json:"change"`
+}
+
+// BlameResponse Blame 响应
+type BlameResponse struct {
+	Path  string             `json:"path"`
+	Lines []BlameLineResponse `json:"lines"`
+}
+
+// BlameLineResponse Blame 行信息响应
+type BlameLineResponse struct {
+	LineNumber int       `json:"line_number"`
+	Hash       string    `json:"hash"`
+	Author     string    `json:"author"`
+	Timestamp  time.Time `json:"timestamp"`
+	Content    string    `json:"content"`
+}
+
+// requireGitRepo 检查 Git 仓库是否可用的辅助方法
+func (s *Server) requireGitRepo(c *gin.Context) bool {
+	if s.gitRepo == nil {
+		c.JSON(http.StatusServiceUnavailable, APIResponse{
+			Success: false,
+			Error:   "Git 仓库未加载，历史分析功能不可用。请先运行 store 命令索引一个仓库",
+		})
+		return false
+	}
+	return true
+}
+
+// convertCommitInfo 转换 CommitInfo 到响应格式
+func convertCommitInfo(info *repogit.CommitInfo) CommitInfoResponse {
+	resp := CommitInfoResponse{
+		Hash:      info.Hash,
+		ShortHash: info.ShortHash,
+		Author:    info.Author,
+		Email:     info.Email,
+		Message:   info.Message,
+		Timestamp: info.Timestamp,
+	}
+	for _, f := range info.Files {
+		resp.Files = append(resp.Files, FileChangeResponse{
+			Path:      f.Path,
+			OldPath:   f.OldPath,
+			Status:    f.Status,
+			Additions: f.Additions,
+			Deletions: f.Deletions,
+		})
+	}
+	return resp
+}
+
+// handleGetCommits 获取提交历史
+// GET /api/v1/history/commits?limit=20&author=xxx&since=xxx&until=xxx&keyword=xxx&file=xxx
+func (s *Server) handleGetCommits(c *gin.Context) {
+	if !s.requireGitRepo(c) {
+		return
+	}
+
+	limitStr := c.DefaultQuery("limit", "20")
+	limit, _ := strconv.Atoi(limitStr)
+	if limit <= 0 {
+		limit = 20
+	}
+
+	opts := repogit.LogOptions{
+		MaxCount: limit,
+		Author:   c.Query("author"),
+		Keyword:  c.Query("keyword"),
+		FilePath: c.Query("file"),
+	}
+
+	if since := c.Query("since"); since != "" {
+		if t, err := time.Parse(time.RFC3339, since); err == nil {
+			opts.Since = t
+		} else if t, err := time.Parse("2006-01-02", since); err == nil {
+			opts.Since = t
+		}
+	}
+	if until := c.Query("until"); until != "" {
+		if t, err := time.Parse(time.RFC3339, until); err == nil {
+			opts.Until = t
+		} else if t, err := time.Parse("2006-01-02", until); err == nil {
+			opts.Until = t
+		}
+	}
+
+	commits, err := s.gitRepo.Log(c.Request.Context(), opts)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, APIResponse{
+			Success: false,
+			Error:   fmt.Sprintf("查询提交历史失败: %v", err),
+		})
+		return
+	}
+
+	results := make([]CommitInfoResponse, len(commits))
+	for i, ci := range commits {
+		results[i] = convertCommitInfo(&ci)
+	}
+
+	c.JSON(http.StatusOK, APIResponse{
+		Success: true,
+		Data: gin.H{
+			"commits": results,
+			"count":   len(results),
+		},
+	})
+}
+
+// handleGetCommitDetail 获取提交详情
+// GET /api/v1/history/commit/:hash
+func (s *Server) handleGetCommitDetail(c *gin.Context) {
+	if !s.requireGitRepo(c) {
+		return
+	}
+
+	hash := c.Param("hash")
+	if hash == "" {
+		c.JSON(http.StatusBadRequest, APIResponse{
+			Success: false,
+			Error:   "提交哈希不能为空",
+		})
+		return
+	}
+
+	detail, err := s.gitRepo.CommitDetail(hash)
+	if err != nil {
+		c.JSON(http.StatusNotFound, APIResponse{
+			Success: false,
+			Error:   fmt.Sprintf("获取提交详情失败: %v", err),
+		})
+		return
+	}
+
+	resp := convertCommitInfo(detail)
+
+	// 计算统计信息
+	totalAdditions, totalDeletions := 0, 0
+	for _, f := range detail.Files {
+		totalAdditions += f.Additions
+		totalDeletions += f.Deletions
+	}
+
+	c.JSON(http.StatusOK, APIResponse{
+		Success: true,
+		Data: gin.H{
+			"commit": resp,
+			"stats": gin.H{
+				"files_changed":   len(detail.Files),
+				"total_additions": totalAdditions,
+				"total_deletions": totalDeletions,
+			},
+		},
+	})
+}
+
+// handleGetFileHistory 获取文件变更历史
+// GET /api/v1/history/file?path=xxx&limit=20
+func (s *Server) handleGetFileHistory(c *gin.Context) {
+	if !s.requireGitRepo(c) {
+		return
+	}
+
+	filePath := c.Query("path")
+	if filePath == "" {
+		c.JSON(http.StatusBadRequest, APIResponse{
+			Success: false,
+			Error:   "参数 path 不能为空",
+		})
+		return
+	}
+
+	limitStr := c.DefaultQuery("limit", "20")
+	limit, _ := strconv.Atoi(limitStr)
+	if limit <= 0 {
+		limit = 20
+	}
+
+	entries, err := s.gitRepo.FileHistory(c.Request.Context(), filePath, limit)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, APIResponse{
+			Success: false,
+			Error:   fmt.Sprintf("查询文件历史失败: %v", err),
+		})
+		return
+	}
+
+	items := make([]FileHistoryItem, len(entries))
+	for i, e := range entries {
+		items[i] = FileHistoryItem{
+			Commit: convertCommitInfo(&e.Commit),
+			Change: FileChangeResponse{
+				Path:      e.Change.Path,
+				OldPath:   e.Change.OldPath,
+				Status:    e.Change.Status,
+				Additions: e.Change.Additions,
+				Deletions: e.Change.Deletions,
+			},
+		}
+	}
+
+	c.JSON(http.StatusOK, APIResponse{
+		Success: true,
+		Data: FileHistoryResponse{
+			Path:    filePath,
+			Entries: items,
+		},
+	})
+}
+
+// handleGetBlame 获取文件 Blame 信息
+// GET /api/v1/history/blame?path=xxx
+func (s *Server) handleGetBlame(c *gin.Context) {
+	if !s.requireGitRepo(c) {
+		return
+	}
+
+	filePath := c.Query("path")
+	if filePath == "" {
+		c.JSON(http.StatusBadRequest, APIResponse{
+			Success: false,
+			Error:   "参数 path 不能为空",
+		})
+		return
+	}
+
+	result, err := s.gitRepo.Blame(filePath)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, APIResponse{
+			Success: false,
+			Error:   fmt.Sprintf("Blame 失败: %v", err),
+		})
+		return
+	}
+
+	lines := make([]BlameLineResponse, len(result.Lines))
+	for i, l := range result.Lines {
+		lines[i] = BlameLineResponse{
+			LineNumber: l.LineNumber,
+			Hash:       l.Hash,
+			Author:     l.Author,
+			Timestamp:  l.Timestamp,
+			Content:    l.Content,
+		}
+	}
+
+	c.JSON(http.StatusOK, APIResponse{
+		Success: true,
+		Data: BlameResponse{
+			Path:  filePath,
+			Lines: lines,
+		},
+	})
+}
+
+// handleGetEntityHistory 获取实体的变更历史
+// GET /api/v1/history/entity?id=xxx&limit=10
+// 结合图存储中的实体信息（文件路径+行号）和 Git 历史
+func (s *Server) handleGetEntityHistory(c *gin.Context) {
+	if !s.requireGitRepo(c) {
+		return
+	}
+
+	entityID := c.Query("id")
+	if entityID == "" {
+		c.JSON(http.StatusBadRequest, APIResponse{
+			Success: false,
+			Error:   "参数 id 不能为空",
+		})
+		return
+	}
+
+	limitStr := c.DefaultQuery("limit", "10")
+	limit, _ := strconv.Atoi(limitStr)
+	if limit <= 0 {
+		limit = 10
+	}
+
+	// 1. 从图存储获取实体信息
+	if s.store == nil {
+		c.JSON(http.StatusServiceUnavailable, APIResponse{
+			Success: false,
+			Error:   "知识库未初始化",
+		})
+		return
+	}
+
+	node, err := s.store.GetEntity(c.Request.Context(), entityID)
+	if err != nil {
+		c.JSON(http.StatusNotFound, APIResponse{
+			Success: false,
+			Error:   fmt.Sprintf("实体不存在: %v", err),
+		})
+		return
+	}
+
+	// 2. 根据实体所在文件查询变更历史
+	commits, err := s.gitRepo.CommitsByEntity(c.Request.Context(), node.FilePath, node.StartLine, node.EndLine, limit)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, APIResponse{
+			Success: false,
+			Error:   fmt.Sprintf("查询实体历史失败: %v", err),
+		})
+		return
+	}
+
+	commitResponses := make([]CommitInfoResponse, len(commits))
+	for i, ci := range commits {
+		commitResponses[i] = convertCommitInfo(&ci)
+	}
+
+	c.JSON(http.StatusOK, APIResponse{
+		Success: true,
+		Data: gin.H{
+			"entity": EntityInfo{
+				ID:        node.ID,
+				Name:      node.Name,
+				Type:      string(node.Type),
+				FilePath:  node.FilePath,
+				StartLine: node.StartLine,
+				EndLine:   node.EndLine,
+				Signature: node.Signature,
+			},
+			"commits": commitResponses,
+			"count":   len(commitResponses),
+		},
 	})
 }
