@@ -1,0 +1,100 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>RepoMind - 代码知识库</title>
+    <link rel="stylesheet" href="/style.css">
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/github-dark.min.css">
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/d3/7.9.0/d3.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/marked/12.0.1/marked.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/languages/go.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/languages/python.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/languages/java.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/languages/typescript.min.js"></script>
+</head>
+<body>
+    <nav class="navbar">
+        <div class="navbar-brand">
+            <span class="logo">RM</span>
+            <span class="brand-text">RepoMind</span>
+        </div>
+        <div class="navbar-actions">
+            <button id="btn-stats" class="nav-btn" title="工作区统计">
+                <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="12" width="4" height="9"/><rect x="10" y="7" width="4" height="14"/><rect x="17" y="3" width="4" height="18"/></svg>
+                <span>统计</span>
+            </button>
+            <button id="btn-graph" class="nav-btn" title="知识图谱">
+                <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="6" cy="6" r="3"/><circle cx="18" cy="18" r="3"/><circle cx="18" cy="6" r="3"/><line x1="8.5" y1="7.5" x2="15.5" y2="16.5"/><line x1="8.5" y1="6" x2="15.5" y2="6"/></svg>
+                <span>图谱</span>
+            </button>
+        </div>
+    </nav>
+
+    <main class="main-container">
+        <!-- Chat Panel -->
+        <div class="chat-panel" id="chat-panel">
+            <div class="messages" id="messages">
+                <div class="welcome">
+                    <h2>欢迎使用 RepoMind</h2>
+                    <p>我是你的代码知识库助手，可以帮你分析代码结构、查找函数调用关系、理解代码逻辑。</p>
+                    <div class="quick-actions">
+                        <button class="quick-btn" data-query="这个项目的整体架构是怎样的？">项目架构</button>
+                        <button class="quick-btn" data-query="列出所有主要的函数和类">核心实体</button>
+                        <button class="quick-btn" data-query="有哪些循环依赖？">循环依赖</button>
+                        <button class="quick-btn" data-query="入口函数在哪里，调用了哪些关键函数？">入口分析</button>
+                    </div>
+                </div>
+            </div>
+            <div class="input-area">
+                <div class="input-wrapper">
+                    <textarea id="user-input" placeholder="输入你的问题..." rows="1"></textarea>
+                    <button id="btn-send" class="send-btn" title="发送">
+                        <svg width="20" height="20" viewBox="0 0 24 24" fill="currentColor"><path d="M2.01 21L23 12 2.01 3 2 10l15 2-15 2z"/></svg>
+                    </button>
+                </div>
+            </div>
+        </div>
+
+        <!-- Graph Panel -->
+        <div class="graph-panel hidden" id="graph-panel">
+            <div class="graph-header">
+                <h3>知识图谱</h3>
+                <div class="graph-controls">
+                    <select id="graph-filter">
+                        <option value="all">全部类型</option>
+                        <option value="function">函数</option>
+                        <option value="class">类</option>
+                        <option value="method">方法</option>
+                    </select>
+                    <button id="btn-graph-reset" class="control-btn" title="重置视图">重置</button>
+                </div>
+            </div>
+            <div class="graph-container" id="graph-container">
+                <svg id="graph-svg"></svg>
+            </div>
+            <div class="graph-legend">
+                <span class="legend-item"><span class="dot dot-function"></span>函数</span>
+                <span class="legend-item"><span class="dot dot-class"></span>类</span>
+                <span class="legend-item"><span class="dot dot-method"></span>方法</span>
+            </div>
+        </div>
+    </main>
+
+    <!-- Stats Modal -->
+    <div class="modal hidden" id="stats-modal">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h3>工作区统计</h3>
+                <button class="modal-close" id="stats-close">&times;</button>
+            </div>
+            <div class="modal-body" id="stats-body">
+                <div class="stats-loading">加载中...</div>
+            </div>
+        </div>
+    </div>
+
+    <script src="/app.js"></script>
+</body>
+</html>
