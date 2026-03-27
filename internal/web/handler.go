@@ -7,7 +7,9 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"io/fs"
 	"net/http"
+	"strings"
 
 	"github.com/gin-gonic/gin"
 
@@ -49,57 +51,9 @@ func NewHandler(cfg Config) *Handler {
 
 // SetupRoutes registers web UI and agent API routes on the given Gin engine
 func (h *Handler) SetupRoutes(router *gin.Engine) {
-	// 直接从嵌入的文件系统读取内容并返回，避免 FileFromFS 的 301 重定向问题
-	router.GET("/", func(c *gin.Context) {
-		data, err := staticFS.ReadFile("static/index.html")
-		if err != nil {
-			c.String(http.StatusNotFound, "index.html not found")
-			return
-		}
-		c.Data(http.StatusOK, "text/html; charset=utf-8", data)
-	})
-	router.GET("/app.js", func(c *gin.Context) {
-		data, err := staticFS.ReadFile("static/app.js")
-		if err != nil {
-			c.String(http.StatusNotFound, "app.js not found")
-			return
-		}
-		c.Data(http.StatusOK, "application/javascript; charset=utf-8", data)
-	})
-	router.GET("/style.css", func(c *gin.Context) {
-		data, err := staticFS.ReadFile("static/style.css")
-		if err != nil {
-			c.String(http.StatusNotFound, "style.css not found")
-			return
-		}
-		c.Data(http.StatusOK, "text/css; charset=utf-8", data)
-	})
-
-	// Explorer page (代码图谱浏览器)
-	router.GET("/explorer", func(c *gin.Context) {
-		data, err := staticFS.ReadFile("static/explorer.html")
-		if err != nil {
-			c.String(http.StatusNotFound, "explorer.html not found")
-			return
-		}
-		c.Data(http.StatusOK, "text/html; charset=utf-8", data)
-	})
-	router.GET("/explorer.js", func(c *gin.Context) {
-		data, err := staticFS.ReadFile("static/explorer.js")
-		if err != nil {
-			c.String(http.StatusNotFound, "explorer.js not found")
-			return
-		}
-		c.Data(http.StatusOK, "application/javascript; charset=utf-8", data)
-	})
-	router.GET("/explorer.css", func(c *gin.Context) {
-		data, err := staticFS.ReadFile("static/explorer.css")
-		if err != nil {
-			c.String(http.StatusNotFound, "explorer.css not found")
-			return
-		}
-		c.Data(http.StatusOK, "text/css; charset=utf-8", data)
-	})
+	// Vite 构建的 SPA 静态文件
+	subFS, _ := fs.Sub(staticFS, "static")
+	fileServer := http.FileServer(http.FS(subFS))
 
 	// Agent API
 	agentGroup := router.Group("/agent")
@@ -111,6 +65,44 @@ func (h *Handler) SetupRoutes(router *gin.Engine) {
 	// Graph data API for visualization
 	router.GET("/agent/graph/data", h.handleGraphData)
 	router.GET("/agent/stats", h.handleStats)
+
+	// SPA: 静态资源 + index.html fallback
+	router.NoRoute(func(c *gin.Context) {
+		path := c.Request.URL.Path
+
+		// 不处理 API 路径
+		if strings.HasPrefix(path, "/api/") || strings.HasPrefix(path, "/mcp/") {
+			c.JSON(http.StatusNotFound, gin.H{"error": "not found"})
+			return
+		}
+
+		// 尝试作为静态文件提供
+		if path != "/" {
+			stripped := strings.TrimPrefix(path, "/")
+			if _, err := fs.Stat(subFS, stripped); err == nil {
+				fileServer.ServeHTTP(c.Writer, c.Request)
+				return
+			}
+		}
+
+		// SPA fallback: 返回 index.html
+		data, err := staticFS.ReadFile("static/index.html")
+		if err != nil {
+			c.String(http.StatusNotFound, "index.html not found")
+			return
+		}
+		c.Data(http.StatusOK, "text/html; charset=utf-8", data)
+	})
+
+	// Root path
+	router.GET("/", func(c *gin.Context) {
+		data, err := staticFS.ReadFile("static/index.html")
+		if err != nil {
+			c.String(http.StatusNotFound, "index.html not found")
+			return
+		}
+		c.Data(http.StatusOK, "text/html; charset=utf-8", data)
+	})
 }
 
 // --- request / response types ---

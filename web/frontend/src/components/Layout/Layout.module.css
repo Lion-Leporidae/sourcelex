@@ -1,0 +1,215 @@
+/* Layout — Wikipedia-inspired chrome */
+
+.root {
+  display: flex;
+  flex-direction: column;
+  min-height: 100vh;
+}
+
+/* ===== Header ===== */
+.header {
+  background: var(--wiki-surface);
+  border-bottom: 1px solid var(--wiki-border-light);
+  box-shadow: var(--wiki-shadow);
+  position: sticky;
+  top: 0;
+  z-index: 100;
+}
+
+.headerInner {
+  max-width: 1400px;
+  margin: 0 auto;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  height: var(--header-height);
+  padding: 0 20px;
+  gap: 20px;
+}
+
+.headerLeft {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  flex-shrink: 0;
+}
+
+.logo {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  text-decoration: none !important;
+}
+
+.logoMark {
+  width: 30px;
+  height: 30px;
+  background: var(--wiki-accent);
+  border-radius: 4px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-weight: 800;
+  font-size: 11px;
+  color: #fff;
+  font-family: var(--font-code);
+}
+
+.logoText {
+  font-family: var(--font-heading);
+  font-size: 18px;
+  font-weight: 400;
+  color: var(--wiki-text) !important;
+}
+
+.subtitle {
+  font-size: 12px;
+  color: var(--wiki-text-muted);
+  padding-left: 12px;
+  border-left: 1px solid var(--wiki-border-light);
+}
+
+.headerCenter {
+  flex: 1;
+  max-width: 460px;
+}
+
+.searchBox {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  background: var(--wiki-bg);
+  border: 1px solid var(--wiki-border-light);
+  border-radius: 4px;
+  padding: 0 10px;
+  transition: border-color 0.2s;
+}
+
+.searchBox:focus-within {
+  border-color: var(--wiki-accent);
+  box-shadow: 0 0 0 2px rgba(51,102,204,0.15);
+}
+
+.searchBox svg { color: var(--wiki-text-muted); flex-shrink: 0; }
+
+.searchBox input {
+  flex: 1;
+  border: none;
+  background: transparent;
+  font-size: 13px;
+  padding: 7px 4px;
+  outline: none;
+  color: var(--wiki-text);
+  font-family: var(--font-body);
+}
+
+.searchBox input::placeholder { color: var(--wiki-text-muted); }
+
+.headerRight {
+  flex-shrink: 0;
+}
+
+.stats {
+  font-size: 12px;
+  color: var(--wiki-text-muted);
+  font-family: var(--font-code);
+}
+
+/* ===== Body ===== */
+.body {
+  display: flex;
+  flex: 1;
+  max-width: 1400px;
+  margin: 0 auto;
+  width: 100%;
+}
+
+/* ===== Sidebar ===== */
+.sidebar {
+  width: var(--sidebar-width);
+  flex-shrink: 0;
+  background: var(--wiki-surface);
+  border-right: 1px solid var(--wiki-border-light);
+  padding: 16px 0;
+  overflow-y: auto;
+  position: sticky;
+  top: var(--header-height);
+  height: calc(100vh - var(--header-height) - 36px);
+}
+
+.sidebarSection {
+  margin-bottom: 16px;
+}
+
+.sidebarTitle {
+  font-size: 11px;
+  font-weight: 700;
+  color: var(--wiki-text-muted);
+  text-transform: uppercase;
+  letter-spacing: 1px;
+  padding: 4px 16px 6px;
+}
+
+.sidebarItem {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 5px 16px;
+  font-size: 13px;
+  color: var(--wiki-text) !important;
+  text-decoration: none !important;
+  transition: background 0.15s;
+  border-left: 3px solid transparent;
+}
+
+.sidebarItem:hover {
+  background: var(--wiki-sidebar-hover);
+}
+
+.sidebarActive {
+  background: var(--wiki-sidebar-active) !important;
+  border-left-color: var(--wiki-accent);
+  font-weight: 600;
+}
+
+.sidebarIcon {
+  font-size: 14px;
+  width: 20px;
+  text-align: center;
+}
+
+.sidebarStat {
+  display: flex;
+  justify-content: space-between;
+  padding: 3px 16px;
+  font-size: 12px;
+  color: var(--wiki-text-secondary);
+}
+
+/* ===== Main ===== */
+.main {
+  flex: 1;
+  min-width: 0;
+  background: var(--wiki-surface);
+  padding: 24px 32px;
+  border-right: 1px solid var(--wiki-border-light);
+}
+
+/* ===== Footer ===== */
+.footer {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 8px 20px;
+  font-size: 11px;
+  color: var(--wiki-text-muted);
+  border-top: 1px solid var(--wiki-border-light);
+  background: var(--wiki-surface);
+}
+
+.footer a { color: var(--wiki-link); }
+
+@media (max-width: 900px) {
+  .sidebar { display: none; }
+  .main { padding: 16px; }
+}
