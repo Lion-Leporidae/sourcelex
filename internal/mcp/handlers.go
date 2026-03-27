@@ -1542,3 +1542,76 @@ func (s *Server) handleReadFileLines(c *gin.Context) {
 		},
 	})
 }
+
+// FileTreeNode 文件树节点
+type FileTreeNode struct {
+	Name     string          `json:"name"`
+	Path     string          `json:"path"`
+	IsDir    bool            `json:"is_dir"`
+	Children []*FileTreeNode `json:"children,omitempty"`
+}
+
+// handleFileTree 获取仓库文件目录树
+// GET /api/v1/file/tree
+func (s *Server) handleFileTree(c *gin.Context) {
+	if s.repoPath == "" {
+		c.JSON(http.StatusServiceUnavailable, APIResponse{
+			Success: false,
+			Error:   "仓库路径未配置",
+		})
+		return
+	}
+
+	root := &FileTreeNode{
+		Name:  filepath.Base(s.repoPath),
+		Path:  "",
+		IsDir: true,
+	}
+
+	_ = filepath.WalkDir(s.repoPath, func(path string, d os.DirEntry, err error) error {
+		if err != nil {
+			return nil
+		}
+
+		if d.IsDir() {
+			name := d.Name()
+			if strings.HasPrefix(name, ".") || name == "node_modules" || name == "vendor" || name == "__pycache__" {
+				return filepath.SkipDir
+			}
+		}
+
+		relPath, _ := filepath.Rel(s.repoPath, path)
+		if relPath == "." {
+			return nil
+		}
+
+		parts := strings.Split(relPath, string(filepath.Separator))
+		current := root
+		for i, part := range parts {
+			isLast := i == len(parts)-1
+			found := false
+			for _, child := range current.Children {
+				if child.Name == part {
+					current = child
+					found = true
+					break
+				}
+			}
+			if !found {
+				node := &FileTreeNode{
+					Name:  part,
+					Path:  strings.Join(parts[:i+1], "/"),
+					IsDir: !isLast || d.IsDir(),
+				}
+				current.Children = append(current.Children, node)
+				current = node
+			}
+		}
+		return nil
+	})
+
+	c.JSON(http.StatusOK, APIResponse{
+		Success: true,
+		Data:    root,
+	})
+}

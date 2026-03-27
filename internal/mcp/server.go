@@ -155,6 +155,7 @@ func (s *Server) setupRoutes() {
 		// 代码读取工具 (Code Access Tools) — 配合 RepoMap 语义搜索使用
 		v1.POST("/grep", s.handleGrepCode)                         // 在仓库中 grep 搜索代码
 		v1.GET("/file/lines", s.handleReadFileLines)               // 读取文件指定行范围
+		v1.GET("/file/tree", s.handleFileTree)                     // 获取文件目录树
 	}
 
 	// MCP 协议端点

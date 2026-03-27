@@ -75,6 +75,32 @@ func (h *Handler) SetupRoutes(router *gin.Engine) {
 		c.Data(http.StatusOK, "text/css; charset=utf-8", data)
 	})
 
+	// Explorer page (代码图谱浏览器)
+	router.GET("/explorer", func(c *gin.Context) {
+		data, err := staticFS.ReadFile("static/explorer.html")
+		if err != nil {
+			c.String(http.StatusNotFound, "explorer.html not found")
+			return
+		}
+		c.Data(http.StatusOK, "text/html; charset=utf-8", data)
+	})
+	router.GET("/explorer.js", func(c *gin.Context) {
+		data, err := staticFS.ReadFile("static/explorer.js")
+		if err != nil {
+			c.String(http.StatusNotFound, "explorer.js not found")
+			return
+		}
+		c.Data(http.StatusOK, "application/javascript; charset=utf-8", data)
+	})
+	router.GET("/explorer.css", func(c *gin.Context) {
+		data, err := staticFS.ReadFile("static/explorer.css")
+		if err != nil {
+			c.String(http.StatusNotFound, "explorer.css not found")
+			return
+		}
+		c.Data(http.StatusOK, "text/css; charset=utf-8", data)
+	})
+
 	// Agent API
 	agentGroup := router.Group("/agent")
 	{
