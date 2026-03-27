@@ -46,6 +46,7 @@ func init() {
 	// 添加子命令
 	rootCmd.AddCommand(storeCmd)
 	rootCmd.AddCommand(serveCmd)
+	rootCmd.AddCommand(listCmd)
 	rootCmd.AddCommand(versionCmd)
 }
 

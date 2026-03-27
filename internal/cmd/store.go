@@ -6,7 +6,9 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"regexp"
 	"runtime"
+	"strings"
 	"time"
 
 	"github.com/spf13/cobra"
@@ -21,10 +23,31 @@ import (
 
 // RepoMetadata 仓库元数据，持久化到数据目录供 serve 命令使用
 type RepoMetadata struct {
+	RepoID    string    `json:"repo_id"`
 	RepoPath  string    `json:"repo_path"`
 	RepoURL   string    `json:"repo_url,omitempty"`
 	Branch    string    `json:"branch,omitempty"`
 	IndexedAt time.Time `json:"indexed_at"`
+}
+
+// deriveRepoID 从仓库 URL 或路径派生一个短 ID 用作子目录名
+// https://github.com/gin-gonic/gin.git → gin
+// /Users/foo/myproject → myproject
+func deriveRepoID(repoURL, repoPath string) string {
+	name := ""
+	if repoURL != "" {
+		name = filepath.Base(repoURL)
+		name = strings.TrimSuffix(name, ".git")
+	} else if repoPath != "" {
+		name = filepath.Base(repoPath)
+	}
+	// 清理非法字符
+	re := regexp.MustCompile(`[^a-zA-Z0-9_\-.]`)
+	name = re.ReplaceAllString(name, "_")
+	if name == "" || name == "." || name == ".." {
+		name = "default"
+	}
+	return name
 }
 
 var (
@@ -77,18 +100,18 @@ func runStore(cmd *cobra.Command, args []string) error {
 		// 检查目标目录是否已存在
 		if _, err := os.Stat(destPath); err == nil {
 			if forceRebuild {
-				// 强制模式：直接删除已有目录
 				log.Info("检测到已有仓库，强制模式下将删除重建", "path", destPath)
 				if err := os.RemoveAll(destPath); err != nil {
 					return fmt.Errorf("删除已有仓库失败: %w", err)
 				}
 				log.Info("已删除旧仓库")
 
-				// 同时删除 data 目录（向量和图数据库）
-				if err := os.RemoveAll(cfg.Paths.DataDir); err != nil {
-					log.Warn("删除数据目录失败", "path", cfg.Paths.DataDir, "error", err)
+				// 只删除该仓库的数据子目录（不影响其他仓库）
+				repoDataDir := filepath.Join(cfg.Paths.DataDir, deriveRepoID(repoURL, ""))
+				if err := os.RemoveAll(repoDataDir); err != nil {
+					log.Warn("删除仓库数据目录失败", "path", repoDataDir, "error", err)
 				} else {
-					log.Info("已删除旧数据目录", "path", cfg.Paths.DataDir)
+					log.Info("已删除旧数据目录", "path", repoDataDir)
 				}
 			} else {
 				// 非强制模式：询问用户
@@ -170,6 +193,14 @@ func runStore(cmd *cobra.Command, args []string) error {
 	runtime.GC()
 	log.Info("初始化存储层")
 
+	// 按仓库 ID 隔离数据目录
+	repoID := deriveRepoID(repoURL, repoPath)
+	repoDataDir := filepath.Join(cfg.Paths.DataDir, repoID)
+	if err := os.MkdirAll(repoDataDir, 0755); err != nil {
+		return fmt.Errorf("创建仓库数据目录失败: %w", err)
+	}
+	log.Info("仓库数据目录", "repo_id", repoID, "path", repoDataDir)
+
 	// 1. 创建 HuggingFace 嵌入器
 	embedder, err := vector.NewHuggingFaceEmbedder(vector.HuggingFaceConfig{
 		APIToken:  cfg.VectorStore.HuggingFace.APIToken,
@@ -182,7 +213,7 @@ func runStore(cmd *cobra.Command, args []string) error {
 	log.Info("嵌入器初始化完成", "model", cfg.VectorStore.HuggingFace.ModelID)
 
 	// 2. 创建 chromem-go 向量存储（本地持久化，无需外部服务）
-	vectorPath := filepath.Join(cfg.Paths.DataDir, "vectors")
+	vectorPath := filepath.Join(repoDataDir, "vectors")
 	vectorStore, err := vector.NewChromemStore(vector.ChromemConfig{
 		PersistPath:    vectorPath,
 		CollectionName: "code_vectors",
@@ -195,7 +226,7 @@ func runStore(cmd *cobra.Command, args []string) error {
 	log.Info("向量存储初始化完成", "type", "chromem", "path", vectorPath)
 
 	// 3. 创建 SQLite 图存储
-	graphPath := filepath.Join(cfg.Paths.DataDir, "graph.db")
+	graphPath := filepath.Join(repoDataDir, "graph.db")
 	graphStore, err := graph.NewSQLiteStore(graph.SQLiteConfig{
 		DBPath: graphPath,
 	})
@@ -261,7 +292,7 @@ func runStore(cmd *cobra.Command, args []string) error {
 	}
 
 	// 7. 确保数据目录存在
-	if err := os.MkdirAll(cfg.Paths.DataDir, 0755); err != nil {
+	if err := os.MkdirAll(repoDataDir, 0755); err != nil {
 		return fmt.Errorf("创建数据目录失败: %w", err)
 	}
 
@@ -279,12 +310,13 @@ func runStore(cmd *cobra.Command, args []string) error {
 
 	// 9. 保存仓库元数据（供 serve 命令加载 git 历史）
 	meta := RepoMetadata{
+		RepoID:    repoID,
 		RepoPath:  targetPath,
 		RepoURL:   repoURL,
 		Branch:    repoBranch,
 		IndexedAt: time.Now(),
 	}
-	metaPath := filepath.Join(cfg.Paths.DataDir, "metadata.json")
+	metaPath := filepath.Join(repoDataDir, "metadata.json")
 	metaData, err := json.MarshalIndent(meta, "", "  ")
 	if err == nil {
 		if writeErr := os.WriteFile(metaPath, metaData, 0644); writeErr != nil {

@@ -23,8 +23,9 @@ import (
 )
 
 var (
-	serveHost string
-	servePort int
+	serveHost    string
+	servePort    int
+	serveRepoID  string
 )
 
 // serveCmd represents the serve command
@@ -39,17 +40,73 @@ var serveCmd = &cobra.Command{
 - 调用链查询 API
 - SSE 实时推送
 
-默认监听 0.0.0.0:8000
+支持多仓库：使用 --repo 指定仓库名（默认自动选择最近索引的仓库）
 
 示例:
   sourcelex serve
-  sourcelex serve --port 9000`,
+  sourcelex serve --port 9000
+  sourcelex serve --repo gin`,
 	RunE: runServe,
 }
 
 func init() {
 	serveCmd.Flags().StringVar(&serveHost, "host", "0.0.0.0", "监听地址")
 	serveCmd.Flags().IntVar(&servePort, "port", 8000, "监听端口")
+	serveCmd.Flags().StringVar(&serveRepoID, "repo", "", "指定仓库名（留空自动选择最近索引的仓库）")
+}
+
+// findRepoDataDir 查找仓库数据目录
+// 如果指定了 repoID 则直接查找，否则选择最近索引的仓库
+func findRepoDataDir(dataDir, repoID string) (string, *RepoMetadata, error) {
+	if repoID != "" {
+		// 直接查找指定仓库
+		dir := filepath.Join(dataDir, repoID)
+		meta, err := loadRepoMetadata(dir)
+		if err != nil {
+			return "", nil, fmt.Errorf("仓库 '%s' 不存在或未索引: %w", repoID, err)
+		}
+		return dir, meta, nil
+	}
+
+	// 自动选择最近索引的仓库
+	entries, err := os.ReadDir(dataDir)
+	if err != nil {
+		return "", nil, fmt.Errorf("读取数据目录失败: %w", err)
+	}
+
+	var bestDir string
+	var bestMeta *RepoMetadata
+	for _, entry := range entries {
+		if !entry.IsDir() {
+			continue
+		}
+		dir := filepath.Join(dataDir, entry.Name())
+		meta, err := loadRepoMetadata(dir)
+		if err != nil {
+			continue
+		}
+		if bestMeta == nil || meta.IndexedAt.After(bestMeta.IndexedAt) {
+			bestDir = dir
+			bestMeta = meta
+		}
+	}
+
+	if bestMeta == nil {
+		return "", nil, fmt.Errorf("数据目录下没有已索引的仓库，请先运行 store 命令")
+	}
+	return bestDir, bestMeta, nil
+}
+
+func loadRepoMetadata(dir string) (*RepoMetadata, error) {
+	data, err := os.ReadFile(filepath.Join(dir, "metadata.json"))
+	if err != nil {
+		return nil, err
+	}
+	var meta RepoMetadata
+	if err := json.Unmarshal(data, &meta); err != nil {
+		return nil, err
+	}
+	return &meta, nil
 }
 
 func runServe(cmd *cobra.Command, args []string) error {
@@ -81,9 +138,16 @@ func runServe(cmd *cobra.Command, args []string) error {
 		}
 	}
 
+	// 查找仓库数据目录
+	repoDataDir, repoMeta, err := findRepoDataDir(cfg.Paths.DataDir, serveRepoID)
+	if err != nil {
+		return fmt.Errorf("查找仓库数据失败: %w", err)
+	}
+	log.Info("使用仓库", "repo_id", repoMeta.RepoID, "path", repoMeta.RepoPath, "indexed_at", repoMeta.IndexedAt)
+
 	// 初始化向量存储（加载已持久化的 chromem 数据）
 	var vectorStore vector.Store
-	vectorPath := filepath.Join(cfg.Paths.DataDir, "vectors")
+	vectorPath := filepath.Join(repoDataDir, "vectors")
 	if _, err := os.Stat(vectorPath); err == nil {
 		vs, err := vector.NewChromemStore(vector.ChromemConfig{
 			PersistPath:    vectorPath,
@@ -102,7 +166,7 @@ func runServe(cmd *cobra.Command, args []string) error {
 
 	// 初始化图存储（加载已持久化的 SQLite 数据）
 	var graphStore graph.Store
-	graphPath := filepath.Join(cfg.Paths.DataDir, "graph.db")
+	graphPath := filepath.Join(repoDataDir, "graph.db")
 	if _, err := os.Stat(graphPath); err == nil {
 		gs, err := graph.NewSQLiteStore(graph.SQLiteConfig{
 			DBPath: graphPath,
@@ -135,36 +199,23 @@ func runServe(cmd *cobra.Command, args []string) error {
 
 	// 加载 Git 仓库（用于历史分析）
 	var gitRepo *repogit.Repository
-	metaPath := filepath.Join(cfg.Paths.DataDir, "metadata.json")
-	if metaData, err := os.ReadFile(metaPath); err == nil {
-		var meta RepoMetadata
-		if err := json.Unmarshal(metaData, &meta); err == nil && meta.RepoPath != "" {
-			if repo, err := repogit.Open(meta.RepoPath); err == nil {
-				gitRepo = repo
-				log.Info("Git 仓库已加载（支持历史分析）", "path", meta.RepoPath)
-			} else {
-				log.Warn("打开 Git 仓库失败，历史分析功能不可用", "path", meta.RepoPath, "error", err)
-			}
+	if repoMeta.RepoPath != "" {
+		if repo, err := repogit.Open(repoMeta.RepoPath); err == nil {
+			gitRepo = repo
+			log.Info("Git 仓库已加载（支持历史分析）", "path", repoMeta.RepoPath)
+		} else {
+			log.Warn("打开 Git 仓库失败，历史分析功能不可用", "path", repoMeta.RepoPath, "error", err)
 		}
-	} else {
-		log.Warn("未找到仓库元数据，历史分析功能不可用。请先运行 store 命令")
 	}
 
 	// 创建 MCP 服务器
-	var repoPathForMCP string
-	if metaData, err := os.ReadFile(metaPath); err == nil {
-		var meta2 RepoMetadata
-		if json.Unmarshal(metaData, &meta2) == nil {
-			repoPathForMCP = meta2.RepoPath
-		}
-	}
 	server := mcp.New(mcp.Config{
 		Host:     serveHost,
 		Port:     servePort,
 		Store:    knowledgeStore,
 		GitRepo:  gitRepo,
 		Log:      log,
-		RepoPath: repoPathForMCP,
+		RepoPath: repoMeta.RepoPath,
 	})
 
 	// 初始化 Agent（如果配置了 LLM Provider）
