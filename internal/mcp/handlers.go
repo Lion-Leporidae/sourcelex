@@ -23,13 +23,15 @@ import (
 // ========== 请求/响应结构体 ==========
 
 // SemanticSearchRequest 语义搜索请求
-// 对应架构: search_by_semantic()
 type SemanticSearchRequest struct {
 	// Query 自然语言查询
 	Query string `json:"query" binding:"required"`
 
 	// TopK 返回结果数量
 	TopK int `json:"top_k,omitempty"`
+
+	// MinScore 最低置信度阈值 (0-1)，低于此值的结果不返回
+	MinScore float64 `json:"min_score,omitempty"`
 
 	// Filter 过滤条件
 	Filter map[string]interface{} `json:"filter,omitempty"`
@@ -242,24 +244,28 @@ func (s *Server) handleSemanticSearch(c *gin.Context) {
 		return
 	}
 
-	// 转换结果
-	searchResults := make([]SearchResult, len(results))
-	for i, r := range results {
-		searchResults[i] = SearchResult{
+	// 转换结果（按置信度过滤）
+	var searchResults []SearchResult
+	for _, r := range results {
+		if req.MinScore > 0 && float64(r.Score) < req.MinScore {
+			continue
+		}
+		sr := SearchResult{
 			EntityID: r.EntityID,
 			Score:    r.Score,
 			Metadata: r.Metadata,
 		}
 		// 从元数据提取字段
 		if name, ok := r.Metadata["name"].(string); ok {
-			searchResults[i].Name = name
+			sr.Name = name
 		}
 		if t, ok := r.Metadata["type"].(string); ok {
-			searchResults[i].Type = t
+			sr.Type = t
 		}
 		if fp, ok := r.Metadata["file_path"].(string); ok {
-			searchResults[i].FilePath = fp
+			sr.FilePath = fp
 		}
+		searchResults = append(searchResults, sr)
 	}
 
 	c.JSON(http.StatusOK, APIResponse{

@@ -9,6 +9,7 @@ export default function Explorer() {
   const [fileTree, setFileTree] = useState<FTN | null>(null)
   const [searchResults, setSearchResults] = useState<SearchResult[]>([])
   const [searchQuery, setSearchQuery] = useState('')
+  const [minScore, setMinScore] = useState(0.3)
   const svgRef = useRef<SVGSVGElement>(null)
 
   useEffect(() => {
@@ -143,7 +144,7 @@ export default function Explorer() {
 
   const handleSearch = async () => {
     if (!searchQuery.trim()) return
-    const results = await searchSemantic(searchQuery, 10)
+    const results = await searchSemantic(searchQuery, 10, minScore)
     setSearchResults(results)
   }
 
@@ -151,7 +152,7 @@ export default function Explorer() {
     <div>
       <h1 className="wiki-h1">调用图谱浏览器</h1>
 
-      <div style={{ display: 'flex', gap: 12, marginBottom: 16, alignItems: 'center' }}>
+      <div style={{ display: 'flex', gap: 12, marginBottom: 16, alignItems: 'center', flexWrap: 'wrap' }}>
         <input
           type="text"
           placeholder="搜索实体..."
@@ -160,6 +161,16 @@ export default function Explorer() {
           onKeyDown={e => e.key === 'Enter' && handleSearch()}
           style={{ flex: 1, maxWidth: 320, padding: '6px 10px', border: '1px solid #c8ccd1', borderRadius: 4, fontFamily: 'var(--font-code)', fontSize: 13 }}
         />
+        <label style={{ display: 'flex', alignItems: 'center', gap: 6, fontSize: 12, color: 'var(--wiki-text-secondary)' }}>
+          置信度 ≥ {(minScore * 100).toFixed(0)}%
+          <input
+            type="range"
+            min="0" max="0.95" step="0.05"
+            value={minScore}
+            onChange={e => setMinScore(parseFloat(e.target.value))}
+            style={{ width: 100 }}
+          />
+        </label>
         <button onClick={handleSearch} style={{ padding: '6px 16px', background: 'var(--wiki-accent)', color: '#fff', border: 'none', borderRadius: 4, cursor: 'pointer', fontSize: 13 }}>搜索</button>
       </div>
 

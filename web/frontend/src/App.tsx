@@ -4,6 +4,7 @@ import Overview from './pages/Overview'
 import Explorer from './pages/Explorer'
 import Entity from './pages/Entity'
 import FilePage from './pages/FilePage'
+import Chat from './pages/Chat'
 
 export default function App() {
   return (
@@ -13,6 +14,7 @@ export default function App() {
         <Route path="/explorer" element={<Explorer />} />
         <Route path="/entity/:id" element={<Entity />} />
         <Route path="/file/*" element={<FilePage />} />
+        <Route path="/chat" element={<Chat />} />
       </Routes>
     </Layout>
   )

@@ -16,11 +16,13 @@ export async function getGraphData(): Promise<GraphData> {
   return fetchJSON<GraphData>('/agent/graph/data')
 }
 
-export async function searchSemantic(query: string, topK = 8): Promise<SearchResult[]> {
+export async function searchSemantic(query: string, topK = 8, minScore = 0): Promise<SearchResult[]> {
+  const body: Record<string, unknown> = { query, top_k: topK }
+  if (minScore > 0) body.min_score = minScore
   const resp = await fetchJSON<APIResponse<SearchResult[]>>('/api/v1/search/semantic', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ query, top_k: topK }),
+    body: JSON.stringify(body),
   })
   return resp.data || []
 }

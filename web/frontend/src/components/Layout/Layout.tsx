@@ -16,6 +16,7 @@ export default function Layout({ children }: { children: ReactNode }) {
   const navItems = [
     { path: '/', label: '概览', icon: '📊' },
     { path: '/explorer', label: '调用图谱', icon: '🔗' },
+    { path: '/chat', label: 'AI 对话', icon: '💬' },
   ]
 
   return (

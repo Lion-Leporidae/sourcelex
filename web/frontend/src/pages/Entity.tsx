@@ -1,11 +1,13 @@
 import { useEffect, useState } from 'react'
-import { useParams, Link } from 'react-router-dom'
+import { useParams, Link, useNavigate } from 'react-router-dom'
 import { getGraphData, getCallers, getCallees, getFileLines } from '../api/client'
 import type { GraphNode, GraphData, FileContent } from '../api/types'
+import StarGraph from '../components/StarGraph'
 
 export default function Entity() {
   const { id } = useParams<{ id: string }>()
   const entityId = decodeURIComponent(id || '')
+  const navigate = useNavigate()
   const [node, setNode] = useState<GraphNode | null>(null)
   const [callers, setCallers] = useState<GraphNode[]>([])
   const [callees, setCallees] = useState<GraphNode[]>([])
@@ -109,11 +111,26 @@ export default function Entity() {
       <div style={{ background: 'var(--wiki-infobox-bg)', border: '1px solid var(--wiki-border-light)', padding: '10px 16px', margin: '16px 0', borderRadius: 4 }}>
         <strong style={{ fontSize: '0.9em' }}>目录</strong>
         <ol style={{ paddingLeft: 20, margin: '6px 0 0', fontSize: '0.9em', lineHeight: 1.8 }}>
+          <li><a href="#star-graph" style={{ textDecoration: 'none' }}>调用关系星图</a></li>
           <li><a href="#callers" style={{ textDecoration: 'none' }}>调用者 ({callers.length})</a></li>
           <li><a href="#callees" style={{ textDecoration: 'none' }}>被调用 ({callees.length})</a></li>
           <li><a href="#source" style={{ textDecoration: 'none' }}>源代码</a></li>
         </ol>
       </div>
+
+      {/* Star Graph */}
+      <h2 className="wiki-h2" id="star-graph">调用关系星图</h2>
+      {(callers.length > 0 || callees.length > 0) ? (
+        <StarGraph
+          centerId={entityId}
+          centerNode={node}
+          callers={callers}
+          callees={callees}
+          onNodeClick={(id) => navigate(`/entity/${encodeURIComponent(id)}`)}
+        />
+      ) : (
+        <p className="muted text-sm">暂无调用关系数据。</p>
+      )}
 
       {/* Callers Section */}
       <h2 className="wiki-h2" id="callers">调用者</h2>
