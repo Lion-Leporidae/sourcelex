@@ -86,6 +86,194 @@ func (e *Extractor) Extract(tree *sitter.Tree) []CallRelation {
 	return relations
 }
 
+// ExtractImports 从 AST 提取 import 语句并填充符号表
+// 支持 Go/Python/Java/JavaScript 的 import 语法
+func (e *Extractor) ExtractImports(tree *sitter.Tree) {
+	root := tree.RootNode()
+	switch e.language {
+	case "go":
+		e.extractGoImports(root)
+	case "python":
+		e.extractPythonImports(root)
+	case "java":
+		e.extractJavaImports(root)
+	case "javascript", "typescript":
+		e.extractJSImports(root)
+	}
+}
+
+// extractGoImports 提取 Go import 语句
+// import "fmt"                → alias="fmt", module="fmt"
+// import alias "path/to/pkg" → alias="alias", module="path/to/pkg"
+// import ( "pkg1"; "pkg2" )  → 多条
+func (e *Extractor) extractGoImports(node *sitter.Node) {
+	for i := 0; i < int(node.ChildCount()); i++ {
+		child := node.Child(i)
+		if child.Type() == "import_declaration" {
+			e.extractGoImportDecl(child)
+		}
+	}
+}
+
+func (e *Extractor) extractGoImportDecl(node *sitter.Node) {
+	for i := 0; i < int(node.ChildCount()); i++ {
+		child := node.Child(i)
+		switch child.Type() {
+		case "import_spec":
+			e.extractGoImportSpec(child)
+		case "import_spec_list":
+			for j := 0; j < int(child.ChildCount()); j++ {
+				spec := child.Child(j)
+				if spec.Type() == "import_spec" {
+					e.extractGoImportSpec(spec)
+				}
+			}
+		}
+	}
+}
+
+func (e *Extractor) extractGoImportSpec(spec *sitter.Node) {
+	nameNode := spec.ChildByFieldName("name")
+	pathNode := spec.ChildByFieldName("path")
+	if pathNode == nil {
+		return
+	}
+
+	importPath := strings.Trim(e.nodeContent(pathNode), "\"")
+	// 包别名
+	var alias string
+	if nameNode != nil {
+		alias = e.nodeContent(nameNode)
+		if alias == "." || alias == "_" {
+			return
+		}
+	} else {
+		// 默认别名是路径最后一段
+		parts := strings.Split(importPath, "/")
+		alias = parts[len(parts)-1]
+	}
+
+	e.symbolTable.AddImport(e.filePath, alias, importPath)
+}
+
+// extractPythonImports 提取 Python import 语句
+// import os          → alias="os"
+// from os import path → alias="path", module="os.path"
+// import os as myos  → alias="myos", module="os"
+func (e *Extractor) extractPythonImports(node *sitter.Node) {
+	e.walkImportNodes(node, func(n *sitter.Node) {
+		switch n.Type() {
+		case "import_statement":
+			// import x, import x as y
+			nameNode := n.ChildByFieldName("name")
+			if nameNode != nil {
+				name := e.nodeContent(nameNode)
+				parts := strings.Split(name, ".")
+				alias := parts[len(parts)-1]
+				e.symbolTable.AddImport(e.filePath, alias, name)
+			}
+		case "import_from_statement":
+			// from x import y
+			moduleNode := n.ChildByFieldName("module_name")
+			if moduleNode == nil {
+				return
+			}
+			moduleName := e.nodeContent(moduleNode)
+			// 提取导入的名称
+			for j := 0; j < int(n.ChildCount()); j++ {
+				child := n.Child(j)
+				if child.Type() == "dotted_name" && child != moduleNode {
+					importedName := e.nodeContent(child)
+					e.symbolTable.AddImport(e.filePath, importedName, moduleName+"."+importedName)
+				} else if child.Type() == "aliased_import" {
+					nameChild := child.ChildByFieldName("name")
+					aliasChild := child.ChildByFieldName("alias")
+					if nameChild != nil {
+						importedName := e.nodeContent(nameChild)
+						alias := importedName
+						if aliasChild != nil {
+							alias = e.nodeContent(aliasChild)
+						}
+						e.symbolTable.AddImport(e.filePath, alias, moduleName+"."+importedName)
+					}
+				}
+			}
+		}
+	})
+}
+
+// extractJavaImports 提取 Java import 语句
+func (e *Extractor) extractJavaImports(node *sitter.Node) {
+	e.walkImportNodes(node, func(n *sitter.Node) {
+		if n.Type() == "import_declaration" {
+			// 获取完整导入路径
+			for j := 0; j < int(n.ChildCount()); j++ {
+				child := n.Child(j)
+				if child.Type() == "scoped_identifier" || child.Type() == "identifier" {
+					fullPath := e.nodeContent(child)
+					parts := strings.Split(fullPath, ".")
+					shortName := parts[len(parts)-1]
+					if shortName != "*" {
+						e.symbolTable.AddImport(e.filePath, shortName, fullPath)
+					}
+				}
+			}
+		}
+	})
+}
+
+// extractJSImports 提取 JavaScript/TypeScript import 语句
+func (e *Extractor) extractJSImports(node *sitter.Node) {
+	e.walkImportNodes(node, func(n *sitter.Node) {
+		if n.Type() == "import_statement" {
+			// import { x } from 'y'
+			// import x from 'y'
+			sourceNode := n.ChildByFieldName("source")
+			if sourceNode == nil {
+				return
+			}
+			modulePath := strings.Trim(e.nodeContent(sourceNode), "\"'`")
+			parts := strings.Split(modulePath, "/")
+			moduleName := parts[len(parts)-1]
+			// 简化：用模块文件名作为别名
+			e.symbolTable.AddImport(e.filePath, moduleName, modulePath)
+
+			// 提取具名导入
+			for j := 0; j < int(n.ChildCount()); j++ {
+				child := n.Child(j)
+				if child.Type() == "import_clause" {
+					for k := 0; k < int(child.ChildCount()); k++ {
+						clauseChild := child.Child(k)
+						if clauseChild.Type() == "identifier" {
+							name := e.nodeContent(clauseChild)
+							e.symbolTable.AddImport(e.filePath, name, modulePath+"."+name)
+						} else if clauseChild.Type() == "named_imports" {
+							for m := 0; m < int(clauseChild.ChildCount()); m++ {
+								specifier := clauseChild.Child(m)
+								if specifier.Type() == "import_specifier" {
+									nameChild := specifier.ChildByFieldName("name")
+									if nameChild != nil {
+										name := e.nodeContent(nameChild)
+										e.symbolTable.AddImport(e.filePath, name, modulePath+"."+name)
+									}
+								}
+							}
+						}
+					}
+				}
+			}
+		}
+	})
+}
+
+// walkImportNodes 遍历顶层节点查找 import
+func (e *Extractor) walkImportNodes(node *sitter.Node, callback func(*sitter.Node)) {
+	for i := 0; i < int(node.ChildCount()); i++ {
+		child := node.Child(i)
+		callback(child)
+	}
+}
+
 // extractGo 提取 Go 调用关系
 func (e *Extractor) extractGo(root *sitter.Node) []CallRelation {
 	var relations []CallRelation

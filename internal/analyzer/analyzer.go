@@ -81,13 +81,13 @@ func (a *Analyzer) BuildIndex(ctx context.Context) (*AnalysisResult, error) {
 		}, nil
 	}
 
-	// 步骤3-7: 并行解析文件并提取实体
+	// 步骤3-7: 第一遍解析：并行提取实体
 	entities, err := a.analyzeFiles(ctx, filesToAnalyze)
 	if err != nil {
 		return nil, err
 	}
 
-	// 步骤8: 提取调用关系
+	// 步骤8: 第二遍解析：提取 import + 调用关系（需要第一遍的实体构建符号表）
 	relations := a.extractRelations(ctx, filesToAnalyze, entities)
 
 	a.log.Info("索引构建完成",
@@ -168,26 +168,42 @@ func (a *Analyzer) analyzeFiles(ctx context.Context, files []string) ([]entity.E
 }
 
 // extractRelations 提取调用关系
-// 使用已提取的实体构建符号表，然后遍历文件提取调用关系
+// 先构建符号表 + 提取 import 信息，然后遍历文件提取调用关系
 func (a *Analyzer) extractRelations(ctx context.Context, files []string, entities []entity.Entity) []relation.CallRelation {
 	// 1. 从实体构建符号表
 	symbolTable := relation.BuildSymbolTableFromEntities(entities)
 	a.log.Debug("符号表构建完成", "symbols", symbolTable.Size())
 
+	// 2. 第一轮：提取所有文件的 import 信息，填充符号表
+	for _, relPath := range files {
+		absPath := filepath.Join(a.scanner.repoPath, relPath)
+		lang := GetLanguage(relPath)
+		if lang == "" {
+			continue
+		}
+		result, err := a.parser.ParseFile(ctx, absPath, lang)
+		if err != nil {
+			continue
+		}
+		importExtractor := relation.NewExtractor(result.Content, relPath, lang, symbolTable)
+		importExtractor.ExtractImports(result.Tree)
+		result.Tree.Close()
+	}
+	a.log.Debug("import 信息提取完成")
+
+	// 3. 第二轮：并行提取调用关系（符号表已包含 import 信息，解析更准确）
 	var (
 		wg        sync.WaitGroup
 		mu        sync.Mutex
 		relations []relation.CallRelation
 	)
 
-	// 创建任务通道
 	jobs := make(chan string, len(files))
 	for _, f := range files {
 		jobs <- f
 	}
 	close(jobs)
 
-	// 启动 worker
 	for i := 0; i < a.workers; i++ {
 		wg.Add(1)
 		go func() {
@@ -205,13 +221,11 @@ func (a *Analyzer) extractRelations(ctx context.Context, files []string, entitie
 					continue
 				}
 
-				// 解析文件 (Tree-sitter)
 				result, err := a.parser.ParseFile(ctx, absPath, lang)
 				if err != nil {
 					continue
 				}
 
-				// 提取调用关系
 				extractor := relation.NewExtractor(result.Content, relPath, lang, symbolTable)
 				fileRelations := extractor.Extract(result.Tree)
 				result.Tree.Close()

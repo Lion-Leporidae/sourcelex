@@ -12,8 +12,12 @@ import (
 type SymbolTable struct {
 	mu sync.RWMutex
 
-	// globalSymbols 全局符号映射: name -> qualified_name
+	// globalSymbols 全局符号映射: name -> qualified_name（精确匹配）
 	globalSymbols map[string]string
+
+	// nameToQualified 简单名到限定名的多值映射: simpleName -> []qualifiedName
+	// 解决同名函数覆盖问题
+	nameToQualified map[string][]string
 
 	// fileSymbols 文件级符号: file -> {name -> qualified_name}
 	fileSymbols map[string]map[string]string
@@ -25,32 +29,44 @@ type SymbolTable struct {
 // NewSymbolTable 创建空符号表
 func NewSymbolTable() *SymbolTable {
 	return &SymbolTable{
-		globalSymbols: make(map[string]string),
-		fileSymbols:   make(map[string]map[string]string),
-		imports:       make(map[string]map[string]string),
+		globalSymbols:   make(map[string]string),
+		nameToQualified: make(map[string][]string),
+		fileSymbols:     make(map[string]map[string]string),
+		imports:         make(map[string]map[string]string),
 	}
 }
 
 // AddSymbol 添加符号到表中
 // 参数:
-//   - name: 符号名称
+//   - name: 符号简单名称
 //   - qualifiedName: 完全限定名
 //   - filePath: 所在文件
 func (st *SymbolTable) AddSymbol(name, qualifiedName, filePath string) {
 	st.mu.Lock()
 	defer st.mu.Unlock()
 
-	// 添加到全局符号（使用完全限定名）
+	// 精确匹配（限定名 → 自身）
 	st.globalSymbols[qualifiedName] = qualifiedName
 
-	// 添加到全局符号（使用简单名，可能会被覆盖）
-	st.globalSymbols[name] = qualifiedName
+	// 多值映射（简单名 → 可能的限定名列表）
+	existing := st.nameToQualified[name]
+	found := false
+	for _, qn := range existing {
+		if qn == qualifiedName {
+			found = true
+			break
+		}
+	}
+	if !found {
+		st.nameToQualified[name] = append(existing, qualifiedName)
+	}
 
-	// 添加到文件级符号
+	// 文件级符号
 	if st.fileSymbols[filePath] == nil {
 		st.fileSymbols[filePath] = make(map[string]string)
 	}
 	st.fileSymbols[filePath][name] = qualifiedName
+	st.fileSymbols[filePath][qualifiedName] = qualifiedName
 }
 
 // AddImport 添加导入映射
@@ -69,24 +85,19 @@ func (st *SymbolTable) AddImport(filePath, alias, module string) {
 }
 
 // Resolve 解析符号名到完全限定名
-// 参数:
-//   - name: 符号名（可能是简单名或带点的名称）
-//   - fromFile: 调用发生的文件
-//
-// 返回:
-//   - 完全限定名，如果无法解析则返回原名
+// 解析优先级：文件局部 → 精确全局匹配 → import 解析 → 类型.方法 → 简单名多值
 func (st *SymbolTable) Resolve(name, fromFile string) string {
 	st.mu.RLock()
 	defer st.mu.RUnlock()
 
-	// 1. 先查文件局部符号
+	// 1. 先查文件局部符号（同文件定义优先）
 	if fileMap, ok := st.fileSymbols[fromFile]; ok {
 		if qn, ok := fileMap[name]; ok {
 			return qn
 		}
 	}
 
-	// 2. 再查全局符号（尝试完全匹配）
+	// 2. 精确匹配全局符号（限定名完全一致）
 	if qn, ok := st.globalSymbols[name]; ok {
 		return qn
 	}
@@ -97,21 +108,65 @@ func (st *SymbolTable) Resolve(name, fromFile string) string {
 		prefix := parts[0]
 		suffix := parts[1]
 
-		// 先检查是否是导入的模块
+		// 3a. 通过 import 映射解析（pkg.Func → 用 import 信息得到完整路径）
 		if imports, ok := st.imports[fromFile]; ok {
 			if module, ok := imports[prefix]; ok {
-				return module + "." + suffix
+				// 尝试 module.suffix 作为限定名
+				candidate := module + "." + suffix
+				if _, ok := st.globalSymbols[candidate]; ok {
+					return candidate
+				}
+				// 回退：可能 import 的是包路径，而限定名用包名
+				moduleParts := strings.Split(module, "/")
+				pkgName := moduleParts[len(moduleParts)-1]
+				candidate = pkgName + "." + suffix
+				if _, ok := st.globalSymbols[candidate]; ok {
+					return candidate
+				}
+				return candidate // 即使找不到，也用推断的限定名
 			}
 		}
 
-		// 再检查是否是已知的类型
+		// 3b. 前缀是已知类型/类名（Type.Method）
+		if candidates, ok := st.nameToQualified[prefix]; ok && len(candidates) > 0 {
+			// 用第一个匹配的类型作为前缀
+			return candidates[0] + "." + suffix
+		}
+		// 尝试精确匹配
 		if qn, ok := st.globalSymbols[prefix]; ok {
 			return qn + "." + suffix
 		}
 	}
 
-	// 4. 未解析的外部调用，返回原名
+	// 4. 简单名多值查找
+	if candidates, ok := st.nameToQualified[name]; ok && len(candidates) > 0 {
+		// 优先选择同目录/同包下的定义
+		fromDir := fileDir(fromFile)
+		for _, qn := range candidates {
+			// 查找定义该符号的文件
+			for file, fileMap := range st.fileSymbols {
+				for _, fqn := range fileMap {
+					if fqn == qn && fileDir(file) == fromDir {
+						return qn
+					}
+				}
+			}
+		}
+		// 没有同目录的，返回第一个
+		return candidates[0]
+	}
+
+	// 5. 未解析的外部调用，返回原名
 	return name
+}
+
+// fileDir 获取文件所在目录
+func fileDir(filePath string) string {
+	idx := strings.LastIndex(filePath, "/")
+	if idx >= 0 {
+		return filePath[:idx]
+	}
+	return ""
 }
 
 // GetAllSymbols 获取所有全局符号

@@ -178,19 +178,48 @@ func (e *Extractor) extractPythonClass(node *sitter.Node) *Entity {
 	}
 }
 
+// extractGoPackageName 从 Go AST 根节点提取包名
+func (e *Extractor) extractGoPackageName(root *sitter.Node) string {
+	for i := 0; i < int(root.ChildCount()); i++ {
+		child := root.Child(i)
+		if child.Type() == "package_clause" {
+			nameNode := child.ChildByFieldName("name")
+			if nameNode == nil {
+				// fallback: 第二个子节点通常是包名
+				if child.ChildCount() >= 2 {
+					return e.nodeContent(child.Child(1))
+				}
+			} else {
+				return e.nodeContent(nameNode)
+			}
+		}
+	}
+	return ""
+}
+
 // extractGo extracts entities from Go AST
 func (e *Extractor) extractGo(node *sitter.Node) []Entity {
 	var entities []Entity
+	pkgName := e.extractGoPackageName(node)
+
 	e.walkNode(node, "", func(n *sitter.Node, parent string) {
 		switch n.Type() {
 		case "function_declaration":
 			entity := e.extractGoFunction(n)
 			if entity != nil {
+				// 加上包名前缀：pkgName.funcName
+				if pkgName != "" && pkgName != "main" {
+					entity.QualifiedName = pkgName + "." + entity.QualifiedName
+				}
 				entities = append(entities, *entity)
 			}
 		case "method_declaration":
 			entity := e.extractGoMethod(n)
 			if entity != nil {
+				// 方法已经是 Type.Method 格式，加包名: pkg.Type.Method
+				if pkgName != "" && pkgName != "main" {
+					entity.QualifiedName = pkgName + "." + entity.QualifiedName
+				}
 				entities = append(entities, *entity)
 			}
 		case "type_declaration":
@@ -199,6 +228,9 @@ func (e *Extractor) extractGo(node *sitter.Node) []Entity {
 				if child.Type() == "type_spec" {
 					entity := e.extractGoType(child)
 					if entity != nil {
+						if pkgName != "" && pkgName != "main" {
+							entity.QualifiedName = pkgName + "." + entity.QualifiedName
+						}
 						entities = append(entities, *entity)
 					}
 				}
