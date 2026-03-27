@@ -7,7 +7,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
-	"io/fs"
 	"net/http"
 
 	"github.com/gin-gonic/gin"
@@ -50,18 +49,30 @@ func NewHandler(cfg Config) *Handler {
 
 // SetupRoutes registers web UI and agent API routes on the given Gin engine
 func (h *Handler) SetupRoutes(router *gin.Engine) {
-	// Serve embedded static files
-	subFS, _ := fs.Sub(staticFS, "static")
-	httpFS := http.FS(subFS)
-
+	// 直接从嵌入的文件系统读取内容并返回，避免 FileFromFS 的 301 重定向问题
 	router.GET("/", func(c *gin.Context) {
-		c.FileFromFS("/index.html", httpFS)
+		data, err := staticFS.ReadFile("static/index.html")
+		if err != nil {
+			c.String(http.StatusNotFound, "index.html not found")
+			return
+		}
+		c.Data(http.StatusOK, "text/html; charset=utf-8", data)
 	})
 	router.GET("/app.js", func(c *gin.Context) {
-		c.FileFromFS("/app.js", httpFS)
+		data, err := staticFS.ReadFile("static/app.js")
+		if err != nil {
+			c.String(http.StatusNotFound, "app.js not found")
+			return
+		}
+		c.Data(http.StatusOK, "application/javascript; charset=utf-8", data)
 	})
 	router.GET("/style.css", func(c *gin.Context) {
-		c.FileFromFS("/style.css", httpFS)
+		data, err := staticFS.ReadFile("static/style.css")
+		if err != nil {
+			c.String(http.StatusNotFound, "style.css not found")
+			return
+		}
+		c.Data(http.StatusOK, "text/css; charset=utf-8", data)
 	})
 
 	// Agent API

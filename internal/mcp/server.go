@@ -85,6 +85,7 @@ func New(cfg Config) *Server {
 	gin.SetMode(gin.ReleaseMode)
 
 	router := gin.New()
+	router.RedirectTrailingSlash = false // 禁用尾斜杠重定向，避免 GET / 死循环
 
 	// 添加中间件
 	router.Use(gin.Recovery())             // 恢复 panic
