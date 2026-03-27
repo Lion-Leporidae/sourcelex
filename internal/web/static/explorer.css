@@ -483,6 +483,8 @@ body {
 }
 
 .popup-btn:hover { background: var(--accent); color: #fff; border-color: var(--accent); }
+.popup-btn-cross { background: rgba(240,136,62,0.15); border-color: #f0883e; color: #f0883e; }
+.popup-btn-cross:hover { background: #f0883e; color: #fff; }
 
 /* Overlay for popup */
 .overlay {

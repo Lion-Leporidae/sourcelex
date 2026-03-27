@@ -86,6 +86,12 @@ type Edge struct {
 	// Type 关系类型
 	Type EdgeType `json:"type"`
 
+	// SourceFile 调用发生的源文件
+	SourceFile string `json:"source_file,omitempty"`
+
+	// Line 调用发生的行号
+	Line int `json:"line,omitempty"`
+
 	// Metadata 额外元数据
 	Metadata map[string]interface{} `json:"metadata,omitempty"`
 }

@@ -111,12 +111,16 @@ func (s *SQLiteStore) initSchema() error {
 		source_id TEXT NOT NULL,
 		target_id TEXT NOT NULL,
 		type TEXT NOT NULL,
-		created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+		source_file TEXT DEFAULT '',
+		line INTEGER DEFAULT 0,
+		created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+		UNIQUE(source_id, target_id, type, source_file, line)
 	);
 	
 	CREATE INDEX IF NOT EXISTS idx_relationships_source ON relationships(source_id);
 	CREATE INDEX IF NOT EXISTS idx_relationships_target ON relationships(target_id);
 	CREATE INDEX IF NOT EXISTS idx_relationships_type ON relationships(type);
+	CREATE INDEX IF NOT EXISTS idx_relationships_file ON relationships(source_file);
 	`
 
 	// 执行建表语句
@@ -206,13 +210,15 @@ func (s *SQLiteStore) AddNodes(ctx context.Context, nodes []Node) error {
 // AddEdge 添加单条边
 func (s *SQLiteStore) AddEdge(ctx context.Context, edge Edge) error {
 	query := `
-	INSERT INTO relationships (source_id, target_id, type)
-	VALUES (?, ?, ?)
+	INSERT OR IGNORE INTO relationships (source_id, target_id, type, source_file, line)
+	VALUES (?, ?, ?, ?, ?)
 	`
 	_, err := s.db.ExecContext(ctx, query,
 		edge.Source,
 		edge.Target,
 		string(edge.Type),
+		edge.SourceFile,
+		edge.Line,
 	)
 	if err != nil {
 		return fmt.Errorf("插入边失败: %w", err)
@@ -233,8 +239,8 @@ func (s *SQLiteStore) AddEdges(ctx context.Context, edges []Edge) error {
 	defer tx.Rollback()
 
 	stmt, err := tx.PrepareContext(ctx, `
-		INSERT INTO relationships (source_id, target_id, type)
-		VALUES (?, ?, ?)
+		INSERT OR IGNORE INTO relationships (source_id, target_id, type, source_file, line)
+		VALUES (?, ?, ?, ?, ?)
 	`)
 	if err != nil {
 		return fmt.Errorf("准备语句失败: %w", err)
@@ -246,6 +252,8 @@ func (s *SQLiteStore) AddEdges(ctx context.Context, edges []Edge) error {
 			edge.Source,
 			edge.Target,
 			string(edge.Type),
+			edge.SourceFile,
+			edge.Line,
 		)
 		if err != nil {
 			return fmt.Errorf("插入边失败: %w", err)
@@ -510,7 +518,7 @@ func (s *SQLiteStore) GetAllNodes(ctx context.Context) ([]Node, error) {
 
 // GetAllEdges 获取所有边
 func (s *SQLiteStore) GetAllEdges(ctx context.Context) ([]Edge, error) {
-	query := `SELECT source_id, target_id, type FROM relationships`
+	query := `SELECT source_id, target_id, type, COALESCE(source_file, ''), COALESCE(line, 0) FROM relationships`
 	rows, err := s.db.QueryContext(ctx, query)
 	if err != nil {
 		return nil, fmt.Errorf("查询所有边失败: %w", err)
@@ -521,7 +529,7 @@ func (s *SQLiteStore) GetAllEdges(ctx context.Context) ([]Edge, error) {
 	for rows.Next() {
 		var e Edge
 		var edgeType string
-		if err := rows.Scan(&e.Source, &e.Target, &edgeType); err != nil {
+		if err := rows.Scan(&e.Source, &e.Target, &edgeType, &e.SourceFile, &e.Line); err != nil {
 			return nil, fmt.Errorf("扫描边失败: %w", err)
 		}
 		e.Type = EdgeType(edgeType)

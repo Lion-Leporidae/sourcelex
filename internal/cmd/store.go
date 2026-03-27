@@ -245,9 +245,11 @@ func runStore(cmd *cobra.Command, args []string) error {
 		storeRelations := make([]store.Relation, 0, len(result.Relations))
 		for _, r := range result.Relations {
 			storeRelations = append(storeRelations, store.Relation{
-				SourceID: r.CallerID,
-				TargetID: r.CalleeID,
-				Type:     "calls",
+				SourceID:   r.CallerID,
+				TargetID:   r.CalleeID,
+				Type:       "calls",
+				SourceFile: r.CallerFile,
+				Line:       r.Line,
 			})
 		}
 		result.Relations = nil

@@ -299,9 +299,11 @@ func (ks *KnowledgeStore) StoreRelations(ctx context.Context, relations []Relati
 	edges := make([]graph.Edge, 0, len(relations))
 	for _, r := range relations {
 		edges = append(edges, graph.Edge{
-			Source: r.SourceID,
-			Target: r.TargetID,
-			Type:   graph.EdgeType(r.Type),
+			Source:     r.SourceID,
+			Target:     r.TargetID,
+			Type:       graph.EdgeType(r.Type),
+			SourceFile: r.SourceFile,
+			Line:       r.Line,
 		})
 	}
 
@@ -310,9 +312,11 @@ func (ks *KnowledgeStore) StoreRelations(ctx context.Context, relations []Relati
 
 // Relation 调用关系
 type Relation struct {
-	SourceID string
-	TargetID string
-	Type     string // calls, inherits, imports
+	SourceID   string
+	TargetID   string
+	Type       string // calls, inherits, imports
+	SourceFile string // 调用发生的文件
+	Line       int    // 调用发生的行号
 }
 
 // SemanticSearch 语义搜索

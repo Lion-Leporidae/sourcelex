@@ -227,11 +227,20 @@
     const nodeIds = new Set(data.nodes.map(n => n.id));
     const edges = data.edges.filter(e => nodeIds.has(e.source) && nodeIds.has(e.target));
 
-    // Arrow marker
-    svg.append("defs").append("marker").attr("id", "arrow")
+    // Build node file lookup for cross-file detection
+    const nodeFileMap = {};
+    data.nodes.forEach(n => { nodeFileMap[n.id] = n.file_path || ""; });
+
+    // Arrow markers: normal + cross-file
+    const defs = svg.append("defs");
+    defs.append("marker").attr("id", "arrow")
       .attr("viewBox", "0 -5 10 10").attr("refX", 20).attr("refY", 0)
       .attr("markerWidth", 5).attr("markerHeight", 5).attr("orient", "auto")
       .append("path").attr("d", "M0,-4L10,0L0,4").attr("fill", "#30363d");
+    defs.append("marker").attr("id", "arrow-cross")
+      .attr("viewBox", "0 -5 10 10").attr("refX", 20).attr("refY", 0)
+      .attr("markerWidth", 5).attr("markerHeight", 5).attr("orient", "auto")
+      .append("path").attr("d", "M0,-4L10,0L0,4").attr("fill", "#f0883e");
 
     // Simulation
     state.simulation = d3.forceSimulation(data.nodes)
@@ -240,9 +249,28 @@
       .force("center", d3.forceCenter(width / 2, height / 2))
       .force("collision", d3.forceCollide().radius(20));
 
-    // Edges
+    // Edges — cross-file edges are orange dashed
     const link = g.append("g").selectAll("line").data(edges).join("line")
-      .attr("stroke", "#30363d").attr("stroke-width", 1).attr("marker-end", "url(#arrow)");
+      .attr("stroke", d => {
+        const srcFile = nodeFileMap[typeof d.source === "object" ? d.source.id : d.source] || "";
+        const tgtFile = nodeFileMap[typeof d.target === "object" ? d.target.id : d.target] || "";
+        return srcFile !== tgtFile ? "#f0883e" : "#30363d";
+      })
+      .attr("stroke-width", d => {
+        const srcFile = nodeFileMap[typeof d.source === "object" ? d.source.id : d.source] || "";
+        const tgtFile = nodeFileMap[typeof d.target === "object" ? d.target.id : d.target] || "";
+        return srcFile !== tgtFile ? 1.5 : 1;
+      })
+      .attr("stroke-dasharray", d => {
+        const srcFile = nodeFileMap[typeof d.source === "object" ? d.source.id : d.source] || "";
+        const tgtFile = nodeFileMap[typeof d.target === "object" ? d.target.id : d.target] || "";
+        return srcFile !== tgtFile ? "4,3" : "none";
+      })
+      .attr("marker-end", d => {
+        const srcFile = nodeFileMap[typeof d.source === "object" ? d.source.id : d.source] || "";
+        const tgtFile = nodeFileMap[typeof d.target === "object" ? d.target.id : d.target] || "";
+        return srcFile !== tgtFile ? "url(#arrow-cross)" : "url(#arrow)";
+      });
 
     // Nodes
     const node = g.append("g").selectAll("circle").data(data.nodes).join("circle")
@@ -328,6 +356,15 @@
       closePopup();
       highlightRelated(d.id, "callees");
     };
+
+    // Cross-file call chain button
+    const chainBtn = document.getElementById("popup-view-chain");
+    if (chainBtn) {
+      chainBtn.onclick = function () {
+        closePopup();
+        showCrossFileChain(d.id, d.name);
+      };
+    }
   }
 
   function closePopup() {
@@ -378,10 +415,119 @@
 
   function resetHighlight() {
     d3.selectAll("#graph-svg circle").attr("opacity", 1).attr("r", d => sizeMap[d.type] || 7);
-    d3.selectAll("#graph-svg line").attr("opacity", 1).attr("stroke", "#30363d");
+    d3.selectAll("#graph-svg line").attr("opacity", 1)
+      .attr("stroke", d => {
+        const src = typeof d.source === "object" ? d.source.id : d.source;
+        const tgt = typeof d.target === "object" ? d.target.id : d.target;
+        const srcFile = state.graphData ? (state.graphData.nodes.find(n => n.id === src) || {}).file_path : "";
+        const tgtFile = state.graphData ? (state.graphData.nodes.find(n => n.id === tgt) || {}).file_path : "";
+        return srcFile !== tgtFile ? "#f0883e" : "#30363d";
+      });
     d3.selectAll("#graph-svg text").attr("opacity", 1);
     document.getElementById("graph-title").textContent = "调用图谱";
   }
+
+  // ===== Cross-File Call Chain =====
+  function showCrossFileChain(entityId, entityName) {
+    // Fetch callers (depth 3) and callees (depth 3) to build a chain
+    Promise.all([
+      fetch("/api/v1/callers/" + encodeURIComponent(entityId) + "?depth=3").then(r => r.json()),
+      fetch("/api/v1/callees/" + encodeURIComponent(entityId) + "?depth=3").then(r => r.json()),
+    ]).then(([callersResp, calleesResp]) => {
+      const callers = (callersResp.success && callersResp.data) ? callersResp.data : [];
+      const callees = (calleesResp.success && calleesResp.data) ? calleesResp.data : [];
+
+      // Collect all related IDs
+      const relatedIds = new Set([entityId]);
+      callers.forEach(n => relatedIds.add(n.id));
+      callees.forEach(n => relatedIds.add(n.id));
+
+      // Find cross-file nodes only
+      const centerNode = state.graphData ? state.graphData.nodes.find(n => n.id === entityId) : null;
+      const centerFile = centerNode ? centerNode.file_path : "";
+      const crossFileCallers = callers.filter(n => n.file_path !== centerFile);
+      const crossFileCallees = callees.filter(n => n.file_path !== centerFile);
+
+      // Highlight cross-file chain
+      const highlightIds = new Set([entityId]);
+      crossFileCallers.forEach(n => highlightIds.add(n.id));
+      crossFileCallees.forEach(n => highlightIds.add(n.id));
+
+      d3.selectAll("#graph-svg circle")
+        .attr("opacity", d => highlightIds.has(d.id) ? 1 : 0.1)
+        .attr("r", d => highlightIds.has(d.id) ? (sizeMap[d.type] || 7) + 4 : sizeMap[d.type] || 7)
+        .attr("stroke", d => d.id === entityId ? "#f0883e" : "#0d1117")
+        .attr("stroke-width", d => d.id === entityId ? 3 : 1.5);
+
+      d3.selectAll("#graph-svg line")
+        .attr("opacity", d => {
+          const src = typeof d.source === "object" ? d.source.id : d.source;
+          const tgt = typeof d.target === "object" ? d.target.id : d.target;
+          return highlightIds.has(src) && highlightIds.has(tgt) ? 1 : 0.03;
+        })
+        .attr("stroke", d => {
+          const src = typeof d.source === "object" ? d.source.id : d.source;
+          const tgt = typeof d.target === "object" ? d.target.id : d.target;
+          if (!highlightIds.has(src) || !highlightIds.has(tgt)) return "#30363d";
+          const srcNode = state.graphData.nodes.find(n => n.id === src);
+          const tgtNode = state.graphData.nodes.find(n => n.id === tgt);
+          return (srcNode && tgtNode && srcNode.file_path !== tgtNode.file_path) ? "#f0883e" : "#58a6ff";
+        })
+        .attr("stroke-width", d => {
+          const src = typeof d.source === "object" ? d.source.id : d.source;
+          const tgt = typeof d.target === "object" ? d.target.id : d.target;
+          return highlightIds.has(src) && highlightIds.has(tgt) ? 2.5 : 1;
+        });
+
+      d3.selectAll("#graph-svg text")
+        .attr("opacity", d => highlightIds.has(d.id) ? 1 : 0.05);
+
+      document.getElementById("graph-title").textContent =
+        entityName + " 的跨文件调用链 (" + crossFileCallers.length + " 调用者, " + crossFileCallees.length + " 被调用)";
+
+      // Show chain details in code viewer
+      let chainHtml = '<div class="code-file-header"><span class="code-file-path">跨文件调用链: ' + esc(entityName) + '</span></div>';
+      chainHtml += '<div class="code-lines">';
+
+      if (crossFileCallers.length > 0) {
+        chainHtml += '<div class="code-line highlighted"><span class="line-content" style="color:#f0883e;font-weight:bold">── 调用者（其他文件 → 本函数）──</span></div>';
+        crossFileCallers.forEach(n => {
+          chainHtml += '<div class="code-line" style="cursor:pointer" onclick="window.__loadFileContent(\'' +
+            esc(n.file_path) + '\',' + (n.start_line || 1) + ',' + (n.end_line || 0) + ')">' +
+            '<span class="line-number" style="color:#3fb950">' + esc(n.type) + '</span>' +
+            '<span class="line-content">' + esc(n.id) + ' <span style="color:#6e7681">(' + esc(n.file_path) + ':' + (n.start_line || '') + ')</span></span></div>';
+        });
+      }
+
+      chainHtml += '<div class="code-line" style="background:#161b22"><span class="line-content" style="color:#58a6ff;font-weight:bold">● ' + esc(entityId) + ' (' + esc(centerFile) + ')</span></div>';
+
+      if (crossFileCallees.length > 0) {
+        chainHtml += '<div class="code-line highlighted"><span class="line-content" style="color:#f0883e;font-weight:bold">── 被调用（本函数 → 其他文件）──</span></div>';
+        crossFileCallees.forEach(n => {
+          chainHtml += '<div class="code-line" style="cursor:pointer" onclick="window.__loadFileContent(\'' +
+            esc(n.file_path) + '\',' + (n.start_line || 1) + ',' + (n.end_line || 0) + ')">' +
+            '<span class="line-number" style="color:#bc8cff">' + esc(n.type) + '</span>' +
+            '<span class="line-content">' + esc(n.id) + ' <span style="color:#6e7681">(' + esc(n.file_path) + ':' + (n.start_line || '') + ')</span></span></div>';
+        });
+      }
+
+      if (crossFileCallers.length === 0 && crossFileCallees.length === 0) {
+        chainHtml += '<div class="code-line"><span class="line-content" style="color:#6e7681">该函数没有跨文件调用关系</span></div>';
+      }
+
+      chainHtml += '</div>';
+      document.getElementById("code-viewer").innerHTML = chainHtml;
+      document.getElementById("code-title").textContent = "跨文件调用链";
+
+      d3.select("#graph-svg").on("click.reset", function () {
+        resetHighlight();
+        d3.select("#graph-svg").on("click.reset", null);
+      });
+    });
+  }
+
+  // Expose loadFileContent for inline onclick handlers
+  window.__loadFileContent = loadFileContent;
 
   function focusNode(entityId) {
     if (!state.graphData) return;
