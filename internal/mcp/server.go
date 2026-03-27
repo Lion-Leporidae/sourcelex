@@ -15,12 +15,14 @@ package mcp
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"net/http"
 	"time"
 
 	"github.com/gin-gonic/gin"
 
+	"github.com/Lion-Leporidae/sourcelex/internal/auth"
 	repogit "github.com/Lion-Leporidae/sourcelex/internal/git"
 	"github.com/Lion-Leporidae/sourcelex/internal/logger"
 	"github.com/Lion-Leporidae/sourcelex/internal/repo"
@@ -36,6 +38,9 @@ type Server struct {
 	registry    *repo.Registry
 	userRepoMgr *repo.UserRepoManager
 
+	// 认证
+	authMgr *auth.Manager
+
 	// 向后兼容：单仓库模式
 	store    *store.KnowledgeStore
 	gitRepo  *repogit.Repository
@@ -50,9 +55,10 @@ type Server struct {
 type Config struct {
 	Host        string
 	Port        int
-	Registry    *repo.Registry        // 多仓库模式
-	UserRepoMgr *repo.UserRepoManager // 用户仓库绑定
-	Store       *store.KnowledgeStore // 向后兼容：单仓库模式
+	Registry    *repo.Registry
+	UserRepoMgr *repo.UserRepoManager
+	AuthMgr     *auth.Manager
+	Store       *store.KnowledgeStore
 	GitRepo     *repogit.Repository
 	Log         *logger.Logger
 	RepoPath    string
@@ -84,10 +90,16 @@ func New(cfg Config) *Server {
 	router.Use(corsMiddleware())
 	router.Use(loggingMiddleware(cfg.Log))
 
+	// 认证中间件（未启用时自动跳过，注入 user_id=anonymous）
+	if cfg.AuthMgr != nil {
+		router.Use(auth.Middleware(cfg.AuthMgr))
+	}
+
 	server := &Server{
 		router:      router,
 		registry:    cfg.Registry,
 		userRepoMgr: cfg.UserRepoMgr,
+		authMgr:     cfg.AuthMgr,
 		store:       cfg.Store,
 		gitRepo:     cfg.GitRepo,
 		log:         cfg.Log,
@@ -100,19 +112,28 @@ func New(cfg Config) *Server {
 	return server
 }
 
+// getUserKey 从请求上下文获取用户标识（优先 auth user_id，回退到 session）
+func (s *Server) getUserKey(c *gin.Context) string {
+	// 优先使用认证的用户 ID
+	if uid := auth.GetUserID(c); uid != "" && uid != "anonymous" {
+		return uid
+	}
+	// 回退到 session ID
+	sessionID := c.GetHeader("X-Session-ID")
+	if sessionID == "" {
+		sessionID = c.Query("sessionId")
+	}
+	if sessionID == "" {
+		sessionID = "default"
+	}
+	return sessionID
+}
+
 // getStore 从请求上下文获取当前用户的活跃仓库 store
-// 优先走多仓库模式（registry），回退到单 store 兼容模式
 func (s *Server) getStore(c *gin.Context) *store.KnowledgeStore {
 	if s.registry != nil && s.userRepoMgr != nil {
-		// 从 query param 或 header 获取 session ID
-		sessionID := c.GetHeader("X-Session-ID")
-		if sessionID == "" {
-			sessionID = c.Query("sessionId")
-		}
-		if sessionID == "" {
-			sessionID = "default"
-		}
-		repoKey := s.userRepoMgr.GetActive(sessionID)
+		userKey := s.getUserKey(c)
+		repoKey := s.userRepoMgr.GetActive(userKey)
 		if rc, err := s.registry.Get(repoKey); err == nil {
 			defer rc.Release()
 			return rc.Store
@@ -124,14 +145,8 @@ func (s *Server) getStore(c *gin.Context) *store.KnowledgeStore {
 // getRepoPath 获取当前仓库路径
 func (s *Server) getRepoPath(c *gin.Context) string {
 	if s.registry != nil && s.userRepoMgr != nil {
-		sessionID := c.GetHeader("X-Session-ID")
-		if sessionID == "" {
-			sessionID = c.Query("sessionId")
-		}
-		if sessionID == "" {
-			sessionID = "default"
-		}
-		repoKey := s.userRepoMgr.GetActive(sessionID)
+		userKey := s.getUserKey(c)
+		repoKey := s.userRepoMgr.GetActive(userKey)
 		if rc, err := s.registry.Get(repoKey); err == nil {
 			defer rc.Release()
 			return rc.RepoPath
@@ -143,14 +158,8 @@ func (s *Server) getRepoPath(c *gin.Context) string {
 // getGitRepo 获取当前 Git 仓库
 func (s *Server) getGitRepo(c *gin.Context) *repogit.Repository {
 	if s.registry != nil && s.userRepoMgr != nil {
-		sessionID := c.GetHeader("X-Session-ID")
-		if sessionID == "" {
-			sessionID = c.Query("sessionId")
-		}
-		if sessionID == "" {
-			sessionID = "default"
-		}
-		repoKey := s.userRepoMgr.GetActive(sessionID)
+		userKey := s.getUserKey(c)
+		repoKey := s.userRepoMgr.GetActive(userKey)
 		if rc, err := s.registry.Get(repoKey); err == nil {
 			defer rc.Release()
 			return rc.GitRepo
@@ -159,10 +168,98 @@ func (s *Server) getGitRepo(c *gin.Context) *repogit.Repository {
 	return s.gitRepo
 }
 
+// ==================== OAuth Handlers ====================
+
+// handleGitHubLogin 重定向到 GitHub OAuth 授权页面
+func (s *Server) handleGitHubLogin(c *gin.Context) {
+	if s.authMgr == nil || !s.authMgr.IsEnabled() {
+		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "认证未启用"})
+		return
+	}
+	redirectURI := fmt.Sprintf("%s/auth/github/callback", c.Request.Header.Get("Origin"))
+	if redirectURI == "/auth/github/callback" {
+		redirectURI = fmt.Sprintf("http://%s:%d/auth/github/callback", s.host, s.port)
+	}
+	c.Redirect(http.StatusTemporaryRedirect, s.authMgr.GetAuthURL(redirectURI))
+}
+
+// handleGitHubCallback 处理 GitHub OAuth 回调
+func (s *Server) handleGitHubCallback(c *gin.Context) {
+	if s.authMgr == nil || !s.authMgr.IsEnabled() {
+		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "认证未启用"})
+		return
+	}
+
+	code := c.Query("code")
+	if code == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "缺少授权码"})
+		return
+	}
+
+	redirectURI := fmt.Sprintf("%s/auth/github/callback", c.Request.Header.Get("Origin"))
+	if redirectURI == "/auth/github/callback" {
+		redirectURI = fmt.Sprintf("http://%s:%d/auth/github/callback", s.host, s.port)
+	}
+
+	user, err := s.authMgr.ExchangeCode(code, redirectURI)
+	if err != nil {
+		s.log.Error("GitHub OAuth 失败", "error", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+
+	token, err := s.authMgr.IssueJWT(user)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "签发 token 失败"})
+		return
+	}
+
+	s.log.Info("用户登录成功", "user", user.Login, "id", user.ID)
+
+	// 返回 HTML 页面，自动将 token 传给前端
+	c.Data(http.StatusOK, "text/html; charset=utf-8", []byte(fmt.Sprintf(`<!DOCTYPE html>
+<html><body><script>
+  window.localStorage.setItem('sourcelex_token', '%s');
+  window.localStorage.setItem('sourcelex_user', JSON.stringify(%s));
+  window.location.href = '/';
+</script></body></html>`, token, mustJSON(user))))
+}
+
+// handleAuthMe 获取当前用户信息
+func (s *Server) handleAuthMe(c *gin.Context) {
+	userID := auth.GetUserID(c)
+	if userID == "anonymous" {
+		c.JSON(http.StatusOK, gin.H{
+			"authenticated": false,
+			"user_id":       "anonymous",
+			"auth_enabled":  s.authMgr != nil && s.authMgr.IsEnabled(),
+		})
+		return
+	}
+
+	login, _ := c.Get(auth.ContextKeyUserLogin)
+	name, _ := c.Get(auth.ContextKeyUserName)
+	avatar, _ := c.Get(auth.ContextKeyAvatar)
+
+	c.JSON(http.StatusOK, gin.H{
+		"authenticated": true,
+		"user_id":       userID,
+		"login":         login,
+		"name":          name,
+		"avatar_url":    avatar,
+		"auth_enabled":  true,
+	})
+}
+
 // setupRoutes 设置 API 路由
 // 对应架构文档: MCP服务暴露层 - 工具集
 func (s *Server) setupRoutes() {
 	s.router.GET("/health", s.handleHealth)
+
+	// OAuth 认证路由
+	s.router.GET("/auth/github", s.handleGitHubLogin)
+	s.router.GET("/auth/github/callback", s.handleGitHubCallback)
+	s.router.GET("/auth/me", s.handleAuthMe)
 
 	v1 := s.router.Group("/api/v1")
 	{
@@ -260,25 +357,23 @@ func (s *Server) handleSetActiveRepo(c *gin.Context) {
 			return
 		}
 	}
-	s.userRepoMgr.SetActive(req.SessionID, req.RepoKey)
-	s.log.Info("活跃仓库已切换", "session", req.SessionID, "repo", req.RepoKey)
+	userKey := s.getUserKey(c)
+	if req.SessionID != "" {
+		userKey = req.SessionID
+	}
+	s.userRepoMgr.SetActive(userKey, req.RepoKey)
+	s.log.Info("活跃仓库已切换", "user", userKey, "repo", req.RepoKey)
 	c.JSON(http.StatusOK, gin.H{"success": true, "active_repo": req.RepoKey})
 }
 
 // handleGetActiveRepo 获取当前活跃仓库
 func (s *Server) handleGetActiveRepo(c *gin.Context) {
-	sessionID := c.GetHeader("X-Session-ID")
-	if sessionID == "" {
-		sessionID = c.Query("sessionId")
-	}
-	if sessionID == "" {
-		sessionID = "default"
-	}
 	if s.userRepoMgr == nil {
 		c.JSON(http.StatusOK, gin.H{"active_repo": ""})
 		return
 	}
-	c.JSON(http.StatusOK, gin.H{"active_repo": s.userRepoMgr.GetActive(sessionID)})
+	userKey := s.getUserKey(c)
+	c.JSON(http.StatusOK, gin.H{"active_repo": s.userRepoMgr.GetActive(userKey)})
 }
 
 // Start 启动服务器
@@ -338,4 +433,10 @@ func loggingMiddleware(log *logger.Logger) gin.HandlerFunc {
 			"duration", time.Since(start),
 		)
 	}
+}
+
+// mustJSON 将对象序列化为 JSON 字符串
+func mustJSON(v interface{}) string {
+	data, _ := json.Marshal(v)
+	return string(data)
 }

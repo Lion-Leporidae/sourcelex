@@ -14,6 +14,7 @@ import (
 
 	"github.com/Lion-Leporidae/sourcelex/internal/agent"
 	"github.com/Lion-Leporidae/sourcelex/internal/agent/llm"
+	"github.com/Lion-Leporidae/sourcelex/internal/auth"
 	repogit "github.com/Lion-Leporidae/sourcelex/internal/git"
 	"github.com/Lion-Leporidae/sourcelex/internal/mcp"
 	"github.com/Lion-Leporidae/sourcelex/internal/repo"
@@ -224,12 +225,27 @@ func runServe(cmd *cobra.Command, args []string) error {
 	userRepoMgr := repo.NewUserRepoManager(defaultRepoKey)
 	log.Info("多仓库模式已启用", "default_repo", defaultRepoKey, "available", len(registry.List()))
 
+	// 初始化认证管理器
+	authMgr := auth.NewManager(auth.Config{
+		Enabled:            cfg.Auth.Enabled,
+		GitHubClientID:     cfg.Auth.GitHubClientID,
+		GitHubClientSecret: cfg.Auth.GitHubClientSecret,
+		JWTSecret:          cfg.Auth.JWTSecret,
+		JWTExpireHours:     cfg.Auth.JWTExpireHours,
+	})
+	if authMgr.IsEnabled() {
+		log.Info("GitHub OAuth 认证已启用")
+	} else {
+		log.Info("认证未启用（匿名模式）")
+	}
+
 	// 创建 MCP 服务器
 	server := mcp.New(mcp.Config{
 		Host:        serveHost,
 		Port:        servePort,
 		Registry:    registry,
 		UserRepoMgr: userRepoMgr,
+		AuthMgr:     authMgr,
 		Store:       knowledgeStore,
 		GitRepo:     gitRepo,
 		Log:         log,

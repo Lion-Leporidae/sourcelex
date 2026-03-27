@@ -2,8 +2,17 @@ import type { APIResponse, GraphData, SearchResult, FileTreeNode, FileContent, S
 
 const BASE = ''
 
+function getToken(): string | null {
+  return localStorage.getItem('sourcelex_token')
+}
+
 async function fetchJSON<T>(url: string, init?: RequestInit): Promise<T> {
-  const res = await fetch(BASE + url, init)
+  const headers = new Headers(init?.headers)
+  const token = getToken()
+  if (token) {
+    headers.set('Authorization', 'Bearer ' + token)
+  }
+  const res = await fetch(BASE + url, { ...init, headers })
   if (!res.ok) {
     const text = await res.text().catch(() => res.statusText)
     throw new Error(`API error ${res.status}: ${text}`)
@@ -94,4 +103,25 @@ export async function setActiveRepo(repoKey: string): Promise<void> {
 export async function getActiveRepo(): Promise<string> {
   const resp = await fetchJSON<{ active_repo: string }>('/api/v1/repos/active')
   return resp.active_repo || ''
+}
+
+// ========== Auth API ==========
+
+export interface AuthInfo {
+  authenticated: boolean
+  user_id: string
+  login?: string
+  name?: string
+  avatar_url?: string
+  auth_enabled: boolean
+}
+
+export async function getAuthMe(): Promise<AuthInfo> {
+  return fetchJSON<AuthInfo>('/auth/me')
+}
+
+export function logout() {
+  localStorage.removeItem('sourcelex_token')
+  localStorage.removeItem('sourcelex_user')
+  window.location.reload()
 }

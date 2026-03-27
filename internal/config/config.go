@@ -19,8 +19,18 @@ type Config struct {
 	VectorStore VectorStoreConfig `mapstructure:"vector_store"`
 	GraphStore  GraphStoreConfig  `mapstructure:"graph_store"`
 	MCP         MCPConfig         `mapstructure:"mcp"`
+	Auth        AuthConfig        `mapstructure:"auth"`
 	Agent       AgentConfig       `mapstructure:"agent"`
 	Logging     LoggingConfig     `mapstructure:"logging"`
+}
+
+// AuthConfig defines authentication settings
+type AuthConfig struct {
+	Enabled            bool   `mapstructure:"enabled"`
+	GitHubClientID     string `mapstructure:"github_client_id"`
+	GitHubClientSecret string `mapstructure:"github_client_secret"`
+	JWTSecret          string `mapstructure:"jwt_secret"`
+	JWTExpireHours     int    `mapstructure:"jwt_expire_hours"`
 }
 
 // AgentConfig defines AI agent settings
