@@ -16,6 +16,7 @@ import (
 	"github.com/Lion-Leporidae/sourcelex/internal/agent/llm"
 	repogit "github.com/Lion-Leporidae/sourcelex/internal/git"
 	"github.com/Lion-Leporidae/sourcelex/internal/mcp"
+	"github.com/Lion-Leporidae/sourcelex/internal/repo"
 	"github.com/Lion-Leporidae/sourcelex/internal/store"
 	"github.com/Lion-Leporidae/sourcelex/internal/store/graph"
 	"github.com/Lion-Leporidae/sourcelex/internal/store/vector"
@@ -200,22 +201,39 @@ func runServe(cmd *cobra.Command, args []string) error {
 	// 加载 Git 仓库（用于历史分析）
 	var gitRepo *repogit.Repository
 	if repoMeta.RepoPath != "" {
-		if repo, err := repogit.Open(repoMeta.RepoPath); err == nil {
-			gitRepo = repo
+		if r, err := repogit.Open(repoMeta.RepoPath); err == nil {
+			gitRepo = r
 			log.Info("Git 仓库已加载（支持历史分析）", "path", repoMeta.RepoPath)
 		} else {
 			log.Warn("打开 Git 仓库失败，历史分析功能不可用", "path", repoMeta.RepoPath, "error", err)
 		}
 	}
 
+	// 创建多仓库注册表
+	registry := repo.NewRegistry(repo.RegistryConfig{
+		DataDir:   cfg.Paths.DataDir,
+		Embedder:  embedder,
+		VectorDim: cfg.VectorStore.HuggingFace.Dimension,
+		Log:       log,
+		MaxOpen:   10,
+	})
+	defer registry.Close()
+
+	// 默认活跃仓库 = 当前启动时指定的仓库
+	defaultRepoKey := repo.RepoKey(repoMeta.RepoID, repoMeta.Branch)
+	userRepoMgr := repo.NewUserRepoManager(defaultRepoKey)
+	log.Info("多仓库模式已启用", "default_repo", defaultRepoKey, "available", len(registry.List()))
+
 	// 创建 MCP 服务器
 	server := mcp.New(mcp.Config{
-		Host:     serveHost,
-		Port:     servePort,
-		Store:    knowledgeStore,
-		GitRepo:  gitRepo,
-		Log:      log,
-		RepoPath: repoMeta.RepoPath,
+		Host:        serveHost,
+		Port:        servePort,
+		Registry:    registry,
+		UserRepoMgr: userRepoMgr,
+		Store:       knowledgeStore,
+		GitRepo:     gitRepo,
+		Log:         log,
+		RepoPath:    repoMeta.RepoPath,
 	})
 
 	// 初始化 Agent（如果配置了 LLM Provider）

@@ -1036,7 +1036,7 @@ type BlameLineResponse struct {
 
 // requireGitRepo 检查 Git 仓库是否可用的辅助方法
 func (s *Server) requireGitRepo(c *gin.Context) bool {
-	if s.gitRepo == nil {
+	if s.getGitRepo(c) == nil {
 		c.JSON(http.StatusServiceUnavailable, APIResponse{
 			Success: false,
 			Error:   "Git 仓库未加载，历史分析功能不可用。请先运行 store 命令索引一个仓库",
@@ -1103,7 +1103,7 @@ func (s *Server) handleGetCommits(c *gin.Context) {
 		}
 	}
 
-	commits, err := s.gitRepo.Log(c.Request.Context(), opts)
+	commits, err := s.getGitRepo(c).Log(c.Request.Context(), opts)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, APIResponse{
 			Success: false,
@@ -1142,7 +1142,7 @@ func (s *Server) handleGetCommitDetail(c *gin.Context) {
 		return
 	}
 
-	detail, err := s.gitRepo.CommitDetail(hash)
+	detail, err := s.getGitRepo(c).CommitDetail(hash)
 	if err != nil {
 		c.JSON(http.StatusNotFound, APIResponse{
 			Success: false,
@@ -1195,7 +1195,7 @@ func (s *Server) handleGetFileHistory(c *gin.Context) {
 		limit = 20
 	}
 
-	entries, err := s.gitRepo.FileHistory(c.Request.Context(), filePath, limit)
+	entries, err := s.getGitRepo(c).FileHistory(c.Request.Context(), filePath, limit)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, APIResponse{
 			Success: false,
@@ -1243,7 +1243,7 @@ func (s *Server) handleGetBlame(c *gin.Context) {
 		return
 	}
 
-	result, err := s.gitRepo.Blame(filePath)
+	result, err := s.getGitRepo(c).Blame(filePath)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, APIResponse{
 			Success: false,
@@ -1314,7 +1314,7 @@ func (s *Server) handleGetEntityHistory(c *gin.Context) {
 	}
 
 	// 2. 根据实体所在文件查询变更历史
-	commits, err := s.gitRepo.CommitsByEntity(c.Request.Context(), node.FilePath, node.StartLine, node.EndLine, limit)
+	commits, err := s.getGitRepo(c).CommitsByEntity(c.Request.Context(), node.FilePath, node.StartLine, node.EndLine, limit)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, APIResponse{
 			Success: false,
@@ -1374,7 +1374,7 @@ func (s *Server) handleGrepCode(c *gin.Context) {
 		return
 	}
 
-	if s.repoPath == "" {
+	if s.getRepoPath(c) == "" {
 		c.JSON(http.StatusServiceUnavailable, APIResponse{
 			Success: false,
 			Error:   "仓库路径未配置",
@@ -1401,7 +1401,7 @@ func (s *Server) handleGrepCode(c *gin.Context) {
 	args = append(args, req.Pattern, ".")
 
 	cmd := exec.CommandContext(c.Request.Context(), "grep", args...)
-	cmd.Dir = s.repoPath
+	cmd.Dir = s.getRepoPath(c)
 
 	output, err := cmd.Output()
 	if err != nil {
@@ -1472,7 +1472,7 @@ func (s *Server) handleReadFileLines(c *gin.Context) {
 		return
 	}
 
-	if s.repoPath == "" {
+	if s.getRepoPath(c) == "" {
 		c.JSON(http.StatusServiceUnavailable, APIResponse{
 			Success: false,
 			Error:   "仓库路径未配置",
@@ -1487,8 +1487,8 @@ func (s *Server) handleReadFileLines(c *gin.Context) {
 	}
 
 	// 安全检查：防止路径遍历攻击
-	absPath := filepath.Join(s.repoPath, filePath)
-	if !strings.HasPrefix(absPath, s.repoPath) {
+	absPath := filepath.Join(s.getRepoPath(c), filePath)
+	if !strings.HasPrefix(absPath, s.getRepoPath(c)) {
 		c.JSON(http.StatusBadRequest, APIResponse{
 			Success: false,
 			Error:   "无效的文件路径",
@@ -1560,7 +1560,7 @@ type FileTreeNode struct {
 // handleFileTree 获取仓库文件目录树
 // GET /api/v1/file/tree
 func (s *Server) handleFileTree(c *gin.Context) {
-	if s.repoPath == "" {
+	if s.getRepoPath(c) == "" {
 		c.JSON(http.StatusServiceUnavailable, APIResponse{
 			Success: false,
 			Error:   "仓库路径未配置",
@@ -1569,12 +1569,12 @@ func (s *Server) handleFileTree(c *gin.Context) {
 	}
 
 	root := &FileTreeNode{
-		Name:  filepath.Base(s.repoPath),
+		Name:  filepath.Base(s.getRepoPath(c)),
 		Path:  "",
 		IsDir: true,
 	}
 
-	_ = filepath.WalkDir(s.repoPath, func(path string, d os.DirEntry, err error) error {
+	_ = filepath.WalkDir(s.getRepoPath(c), func(path string, d os.DirEntry, err error) error {
 		if err != nil {
 			return nil
 		}
@@ -1586,7 +1586,7 @@ func (s *Server) handleFileTree(c *gin.Context) {
 			}
 		}
 
-		relPath, _ := filepath.Rel(s.repoPath, path)
+		relPath, _ := filepath.Rel(s.getRepoPath(c), path)
 		if relPath == "." {
 			return nil
 		}

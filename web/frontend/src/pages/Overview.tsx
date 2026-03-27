@@ -1,15 +1,20 @@
 import { useEffect, useState } from 'react'
 import { Link } from 'react-router-dom'
-import { getStats, getGraphData } from '../api/client'
+import { getStats, getGraphData, listRepos, setActiveRepo, getActiveRepo } from '../api/client'
 import type { StatsData, GraphData } from '../api/types'
+import type { RepoInfo } from '../api/client'
 
 export default function Overview() {
   const [stats, setStats] = useState<StatsData | null>(null)
   const [graphData, setGraphData] = useState<GraphData | null>(null)
+  const [repos, setRepos] = useState<RepoInfo[]>([])
+  const [activeRepo, setActiveRepoState] = useState('')
 
   useEffect(() => {
     getStats().then(setStats).catch(() => {})
     getGraphData().then(setGraphData).catch(() => {})
+    listRepos().then(setRepos).catch(() => {})
+    getActiveRepo().then(setActiveRepoState).catch(() => {})
   }, [])
 
   const fileCount = graphData?.nodes
@@ -115,6 +120,59 @@ export default function Overview() {
                     <Link to={`/entity/${encodeURIComponent(id)}`}>{id}</Link>
                   </td>
                   <td className="mono">{count}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </>
+      )}
+
+      {/* Repos */}
+      {repos.length > 0 && (
+        <>
+          <h2 className="wiki-h2">已索引仓库</h2>
+          <table className="wiki-table">
+            <thead>
+              <tr>
+                <th>仓库</th>
+                <th>分支</th>
+                <th>索引时间</th>
+                <th>状态</th>
+                <th>操作</th>
+              </tr>
+            </thead>
+            <tbody>
+              {repos.map(r => (
+                <tr key={r.key}>
+                  <td className="mono text-sm">{r.repo_id}</td>
+                  <td className="mono">{r.branch}</td>
+                  <td className="mono text-sm">{r.indexed_at}</td>
+                  <td>
+                    {r.key === activeRepo ? (
+                      <span style={{ color: 'var(--wiki-success)', fontWeight: 600 }}>● 活跃</span>
+                    ) : (
+                      <span className="muted">—</span>
+                    )}
+                  </td>
+                  <td>
+                    {r.key !== activeRepo && (
+                      <button
+                        onClick={async () => {
+                          await setActiveRepo(r.key)
+                          setActiveRepoState(r.key)
+                          // 刷新数据
+                          getStats().then(setStats).catch(() => {})
+                          getGraphData().then(setGraphData).catch(() => {})
+                        }}
+                        style={{
+                          padding: '2px 10px', background: 'var(--wiki-accent)', color: '#fff',
+                          border: 'none', borderRadius: 3, cursor: 'pointer', fontSize: 12
+                        }}
+                      >
+                        切换
+                      </button>
+                    )}
+                  </td>
                 </tr>
               ))}
             </tbody>

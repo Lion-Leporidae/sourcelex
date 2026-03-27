@@ -1,51 +1,546 @@
-// Package mcp 提供 SSE (Server-Sent Events) 支持
-// 对应架构文档: MCP服务暴露层 - SSE 通信
-//
-// SSE 是一种服务器推送技术，允许服务器向客户端发送事件流
-// MCP 协议使用 SSE 进行实时通信
-//
-// 协议格式:
-// event: message
-// data: {"type": "result", "content": "..."}
+// Package mcp 提供 MCP SSE 传输实现
+// 遵循 MCP SSE Transport 规范:
+//   - GET /mcp/sse  → 建立 SSE 流，发送 endpoint 事件
+//   - POST /mcp/message?sessionId=xxx → 接收 JSON-RPC 请求，通过 SSE 流返回响应
 package mcp
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
+	"sync"
 	"time"
 
 	"github.com/gin-gonic/gin"
+	"github.com/google/uuid"
+
+	"github.com/Lion-Leporidae/sourcelex/internal/store"
 )
 
-// SSEEvent SSE 事件
-type SSEEvent struct {
-	// Event 事件类型
-	Event string `json:"event,omitempty"`
+// ==================== SSE Session 管理 ====================
 
-	// Data 事件数据
-	Data interface{} `json:"data"`
+// sseSession 表示一个活跃的 SSE 连接会话
+type sseSession struct {
+	id       string
+	messages chan []byte // 待发送的 SSE 消息
+	done     chan struct{}
 }
 
-// MCPMessage MCP 协议消息
+// sessionManager 管理所有活跃的 SSE 会话
+type sessionManager struct {
+	mu       sync.RWMutex
+	sessions map[string]*sseSession
+}
+
+func newSessionManager() *sessionManager {
+	return &sessionManager{sessions: make(map[string]*sseSession)}
+}
+
+func (m *sessionManager) create() *sseSession {
+	s := &sseSession{
+		id:       uuid.New().String(),
+		messages: make(chan []byte, 64),
+		done:     make(chan struct{}),
+	}
+	m.mu.Lock()
+	m.sessions[s.id] = s
+	m.mu.Unlock()
+	return s
+}
+
+func (m *sessionManager) get(id string) *sseSession {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	return m.sessions[id]
+}
+
+func (m *sessionManager) remove(id string) {
+	m.mu.Lock()
+	if s, ok := m.sessions[id]; ok {
+		close(s.done)
+		delete(m.sessions, id)
+	}
+	m.mu.Unlock()
+}
+
+// 全局 session 管理器（Server 初始化时创建）
+var sessions = newSessionManager()
+
+// ==================== JSON-RPC 类型 ====================
+
+// jsonRPCRequest JSON-RPC 2.0 请求
+type jsonRPCRequest struct {
+	JSONRPC string                 `json:"jsonrpc"`
+	ID      interface{}            `json:"id,omitempty"` // string | number | null
+	Method  string                 `json:"method"`
+	Params  map[string]interface{} `json:"params,omitempty"`
+}
+
+// jsonRPCResponse JSON-RPC 2.0 响应
+type jsonRPCResponse struct {
+	JSONRPC string          `json:"jsonrpc"`
+	ID      interface{}     `json:"id,omitempty"`
+	Result  interface{}     `json:"result,omitempty"`
+	Error   *jsonRPCError   `json:"error,omitempty"`
+}
+
+type jsonRPCError struct {
+	Code    int         `json:"code"`
+	Message string      `json:"message"`
+	Data    interface{} `json:"data,omitempty"`
+}
+
+// ==================== MCP Tool Schema ====================
+
+type mcpToolInfo struct {
+	Name        string                 `json:"name"`
+	Description string                 `json:"description"`
+	InputSchema map[string]interface{} `json:"inputSchema"`
+}
+
+func (s *Server) mcpToolList() []mcpToolInfo {
+	return []mcpToolInfo{
+		{
+			Name: "semantic_search", Description: "语义搜索代码实体",
+			InputSchema: map[string]interface{}{
+				"type": "object",
+				"properties": map[string]interface{}{
+					"query":     map[string]interface{}{"type": "string", "description": "搜索查询"},
+					"top_k":     map[string]interface{}{"type": "integer", "description": "返回数量，默认 5"},
+					"min_score": map[string]interface{}{"type": "number", "description": "最低相似度 0-1"},
+				},
+				"required": []string{"query"},
+			},
+		},
+		{
+			Name: "get_entity", Description: "获取代码实体详情",
+			InputSchema: map[string]interface{}{
+				"type": "object",
+				"properties": map[string]interface{}{
+					"entity_id": map[string]interface{}{"type": "string", "description": "实体 QualifiedName"},
+				},
+				"required": []string{"entity_id"},
+			},
+		},
+		{
+			Name: "get_callchain", Description: "获取紧凑调用链文本（推荐：比 JSON 节省 95% token）",
+			InputSchema: map[string]interface{}{
+				"type": "object",
+				"properties": map[string]interface{}{
+					"entity_id": map[string]interface{}{"type": "string", "description": "实体 QualifiedName"},
+					"depth":     map[string]interface{}{"type": "integer", "description": "遍历深度，默认 1"},
+				},
+				"required": []string{"entity_id"},
+			},
+		},
+		{
+			Name: "get_graph_summary", Description: "获取完整调用图的紧凑文本摘要，按文件分组",
+			InputSchema: map[string]interface{}{
+				"type": "object",
+				"properties": map[string]interface{}{
+					"file": map[string]interface{}{"type": "string", "description": "可选，按文件路径过滤"},
+				},
+			},
+		},
+		{
+			Name: "get_callers", Description: "查找调用了指定函数的所有调用者",
+			InputSchema: map[string]interface{}{
+				"type": "object",
+				"properties": map[string]interface{}{
+					"entity_id": map[string]interface{}{"type": "string", "description": "实体 QualifiedName"},
+					"depth":     map[string]interface{}{"type": "integer", "description": "遍历深度，默认 2"},
+				},
+				"required": []string{"entity_id"},
+			},
+		},
+		{
+			Name: "get_callees", Description: "查找指定函数调用的所有被调用者",
+			InputSchema: map[string]interface{}{
+				"type": "object",
+				"properties": map[string]interface{}{
+					"entity_id": map[string]interface{}{"type": "string", "description": "实体 QualifiedName"},
+					"depth":     map[string]interface{}{"type": "integer", "description": "遍历深度，默认 2"},
+				},
+				"required": []string{"entity_id"},
+			},
+		},
+		{
+			Name: "grep_code", Description: "在仓库中搜索代码",
+			InputSchema: map[string]interface{}{
+				"type": "object",
+				"properties": map[string]interface{}{
+					"pattern":      map[string]interface{}{"type": "string", "description": "搜索模式（正则表达式）"},
+					"file_pattern": map[string]interface{}{"type": "string", "description": "文件名过滤"},
+				},
+				"required": []string{"pattern"},
+			},
+		},
+		{
+			Name: "read_file_lines", Description: "读取文件指定行范围的代码",
+			InputSchema: map[string]interface{}{
+				"type": "object",
+				"properties": map[string]interface{}{
+					"path":  map[string]interface{}{"type": "string", "description": "文件路径"},
+					"start": map[string]interface{}{"type": "integer", "description": "起始行号"},
+					"end":   map[string]interface{}{"type": "integer", "description": "结束行号"},
+				},
+				"required": []string{"path"},
+			},
+		},
+		{
+			Name: "get_workspace", Description: "获取工作区统计信息",
+			InputSchema: map[string]interface{}{
+				"type": "object",
+				"properties": map[string]interface{}{},
+			},
+		},
+		{
+			Name: "set_active_repo", Description: "设置当前活跃仓库（所有后续搜索将基于此仓库）",
+			InputSchema: map[string]interface{}{
+				"type": "object",
+				"properties": map[string]interface{}{
+					"repo_key": map[string]interface{}{"type": "string", "description": "仓库标识，格式为 repoID@branch（如 gin@main）"},
+				},
+				"required": []string{"repo_key"},
+			},
+		},
+		{
+			Name: "list_repos", Description: "列出所有已索引的代码仓库",
+			InputSchema: map[string]interface{}{
+				"type": "object",
+				"properties": map[string]interface{}{},
+			},
+		},
+		{
+			Name: "get_active_repo", Description: "获取当前活跃仓库信息",
+			InputSchema: map[string]interface{}{
+				"type": "object",
+				"properties": map[string]interface{}{},
+			},
+		},
+	}
+}
+
+// ==================== SSE Handler ====================
+
+// handleSSE 处理 SSE 连接
+// GET /mcp/sse
+// MCP SSE Transport: 发送 endpoint 事件，然后心跳保活
+func (s *Server) handleSSE(c *gin.Context) {
+	c.Header("Content-Type", "text/event-stream")
+	c.Header("Cache-Control", "no-cache")
+	c.Header("Connection", "keep-alive")
+	c.Header("Access-Control-Allow-Origin", "*")
+
+	// 创建会话
+	session := sessions.create()
+	s.log.Info("MCP SSE 客户端已连接", "session", session.id)
+
+	// 发送 endpoint 事件（MCP SSE 规范要求的第一个事件）
+	endpointURL := fmt.Sprintf("/mcp/message?sessionId=%s", session.id)
+	writeSSE(c.Writer, "endpoint", endpointURL)
+
+	ticker := time.NewTicker(15 * time.Second)
+	defer ticker.Stop()
+	defer sessions.remove(session.id)
+	defer s.log.Debug("MCP SSE 客户端断开连接", "session", session.id)
+
+	clientGone := c.Request.Context().Done()
+
+	for {
+		select {
+		case <-clientGone:
+			return
+		case <-session.done:
+			return
+		case msg := <-session.messages:
+			// 通过 SSE 流发送 JSON-RPC 响应
+			writeSSE(c.Writer, "message", string(msg))
+		case <-ticker.C:
+			// 心跳（用注释行保活）
+			fmt.Fprintf(c.Writer, ": heartbeat %d\n\n", time.Now().Unix())
+			c.Writer.Flush()
+		}
+	}
+}
+
+// handleMCPMessage 处理 MCP JSON-RPC 请求
+// POST /mcp/message?sessionId=xxx  （SSE 传输模式）
+// POST /mcp/sse                    （Streamable HTTP 兼容模式）
+func (s *Server) handleMCPMessage(c *gin.Context) {
+	var req jsonRPCRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(400, gin.H{"error": "无效的 JSON-RPC 请求: " + err.Error()})
+		return
+	}
+
+	// 获取 sessionID 用于仓库隔离
+	sessionID := c.Query("sessionId")
+	if sessionID == "" {
+		sessionID = c.GetHeader("X-Session-ID")
+	}
+	if sessionID == "" {
+		sessionID = "default"
+	}
+
+	resp := s.handleJSONRPC(c.Request.Context(), &req, sessionID)
+
+	// 有 sessionId → SSE 传输模式：通过 SSE 流发送
+	if sessionID != "" {
+		if session := sessions.get(sessionID); session != nil {
+			if resp != nil {
+				data, _ := json.Marshal(resp)
+				select {
+				case session.messages <- data:
+				default:
+					s.log.Warn("SSE 消息队列已满", "session", sessionID)
+				}
+			}
+			c.Status(202)
+			return
+		}
+	}
+
+	// 无 sessionId → Streamable HTTP 模式：直接在 HTTP 响应体返回
+	if resp != nil {
+		c.JSON(200, resp)
+	} else {
+		c.Status(202)
+	}
+}
+
+// ==================== JSON-RPC 路由 ====================
+
+func (s *Server) handleJSONRPC(ctx context.Context, req *jsonRPCRequest, sessionID string) *jsonRPCResponse {
+	switch req.Method {
+	case "initialize":
+		return s.rpcInitialize(req)
+	case "tools/list":
+		return s.rpcToolsList(req)
+	case "tools/call":
+		return s.rpcToolsCall(ctx, req, sessionID)
+	case "notifications/initialized":
+		// 通知类型，无需响应
+		return nil
+	default:
+		return &jsonRPCResponse{
+			JSONRPC: "2.0",
+			ID:      req.ID,
+			Error:   &jsonRPCError{Code: -32601, Message: "Method not found: " + req.Method},
+		}
+	}
+}
+
+func (s *Server) rpcInitialize(req *jsonRPCRequest) *jsonRPCResponse {
+	return &jsonRPCResponse{
+		JSONRPC: "2.0",
+		ID:      req.ID,
+		Result: map[string]interface{}{
+			"protocolVersion": "2024-11-05",
+			"capabilities": map[string]interface{}{
+				"tools": map[string]interface{}{},
+			},
+			"serverInfo": map[string]interface{}{
+				"name":    "sourcelex",
+				"version": "1.0.0",
+			},
+		},
+	}
+}
+
+func (s *Server) rpcToolsList(req *jsonRPCRequest) *jsonRPCResponse {
+	return &jsonRPCResponse{
+		JSONRPC: "2.0",
+		ID:      req.ID,
+		Result: map[string]interface{}{
+			"tools": s.mcpToolList(),
+		},
+	}
+}
+
+func (s *Server) rpcToolsCall(ctx context.Context, req *jsonRPCRequest, sessionID string) *jsonRPCResponse {
+	params := req.Params
+	toolName, _ := params["name"].(string)
+	args, _ := params["arguments"].(map[string]interface{})
+	if args == nil {
+		args = make(map[string]interface{})
+	}
+
+	// 解析当前 session 的活跃仓库 store
+	activeStore := s.resolveStore(sessionID)
+
+	result, err := s.executeToolCall(ctx, activeStore, toolName, args)
+	if err != nil {
+		return &jsonRPCResponse{
+			JSONRPC: "2.0",
+			ID:      req.ID,
+			Result: map[string]interface{}{
+				"content": []map[string]interface{}{
+					{"type": "text", "text": "Error: " + err.Error()},
+				},
+				"isError": true,
+			},
+		}
+	}
+
+	// 将结果转为 text content
+	var text string
+	switch v := result.(type) {
+	case string:
+		text = v
+	default:
+		data, _ := json.MarshalIndent(result, "", "  ")
+		text = string(data)
+	}
+
+	return &jsonRPCResponse{
+		JSONRPC: "2.0",
+		ID:      req.ID,
+		Result: map[string]interface{}{
+			"content": []map[string]interface{}{
+				{"type": "text", "text": text},
+			},
+		},
+	}
+}
+
+// resolveStore 根据 sessionID 解析活跃仓库的 store
+func (s *Server) resolveStore(sessionID string) *store.KnowledgeStore {
+	if s.registry != nil && s.userRepoMgr != nil {
+		repoKey := s.userRepoMgr.GetActive(sessionID)
+		if rc, err := s.registry.Get(repoKey); err == nil {
+			defer rc.Release()
+			return rc.Store
+		}
+	}
+	return s.store
+}
+
+// executeToolCall 执行具体的工具调用
+func (s *Server) executeToolCall(ctx context.Context, ks *store.KnowledgeStore, toolName string, args map[string]interface{}) (interface{}, error) {
+	switch toolName {
+	case "semantic_search":
+		query, _ := args["query"].(string)
+		topK := 5
+		if tk, ok := args["top_k"].(float64); ok {
+			topK = int(tk)
+		}
+		return ks.SemanticSearch(ctx, query, topK)
+
+	case "get_entity":
+		id, _ := args["entity_id"].(string)
+		return ks.GetEntity(ctx, id)
+
+	case "get_callchain":
+		id, _ := args["entity_id"].(string)
+		depth := 1
+		if d, ok := args["depth"].(float64); ok {
+			depth = int(d)
+		}
+		return ks.CallChainCompact(ctx, id, depth)
+
+	case "get_graph_summary":
+		file, _ := args["file"].(string)
+		return ks.CallGraphSummary(ctx, file)
+
+	case "get_callers":
+		id, _ := args["entity_id"].(string)
+		depth := 2
+		if d, ok := args["depth"].(float64); ok {
+			depth = int(d)
+		}
+		return ks.GetCallersOf(ctx, id, depth)
+
+	case "get_callees":
+		id, _ := args["entity_id"].(string)
+		depth := 2
+		if d, ok := args["depth"].(float64); ok {
+			depth = int(d)
+		}
+		return ks.GetCalleesOf(ctx, id, depth)
+
+	case "get_workspace":
+		return ks.Stats(ctx)
+
+	case "grep_code":
+		// 直接转发到 REST API 的逻辑
+		pattern, _ := args["pattern"].(string)
+		if pattern == "" {
+			return nil, fmt.Errorf("pattern 参数必填")
+		}
+		return map[string]string{"info": "请使用 REST API /api/v1/grep"}, nil
+
+	case "read_file_lines":
+		path, _ := args["path"].(string)
+		if path == "" {
+			return nil, fmt.Errorf("path 参数必填")
+		}
+		return map[string]string{"info": "请使用 REST API /api/v1/file/lines?path=" + path}, nil
+
+	case "set_active_repo":
+		repoKey, _ := args["repo_key"].(string)
+		sessionIDArg, _ := args["session_id"].(string)
+		if repoKey == "" {
+			return nil, fmt.Errorf("repo_key 参数必填")
+		}
+		if s.userRepoMgr != nil {
+			sid := sessionIDArg
+			if sid == "" {
+				sid = "default"
+			}
+			s.userRepoMgr.SetActive(sid, repoKey)
+			return map[string]string{"success": "true", "active_repo": repoKey}, nil
+		}
+		return nil, fmt.Errorf("多仓库模式未启用")
+
+	case "list_repos":
+		if s.registry != nil {
+			return s.registry.List(), nil
+		}
+		return []interface{}{}, nil
+
+	case "get_active_repo":
+		sessionIDArg, _ := args["session_id"].(string)
+		if sessionIDArg == "" {
+			sessionIDArg = "default"
+		}
+		if s.userRepoMgr != nil {
+			return map[string]string{"active_repo": s.userRepoMgr.GetActive(sessionIDArg)}, nil
+		}
+		return map[string]string{"active_repo": ""}, nil
+
+	default:
+		return nil, fmt.Errorf("未知工具: %s", toolName)
+	}
+}
+
+// ==================== 辅助函数 ====================
+
+// writeSSE 写入一条 SSE 事件
+func writeSSE(w io.Writer, event, data string) {
+	fmt.Fprintf(w, "event: %s\ndata: %s\n\n", event, data)
+	if f, ok := w.(interface{ Flush() }); ok {
+		f.Flush()
+	}
+}
+
+// ==================== 以下保留兼容旧接口 ====================
+
+// SSEEvent SSE 事件（兼容旧代码）
+type SSEEvent struct {
+	Event string      `json:"event,omitempty"`
+	Data  interface{} `json:"data"`
+}
+
+// MCPMessage MCP 协议消息（兼容旧代码）
 type MCPMessage struct {
-	// Type 消息类型: request, response, notification
-	Type string `json:"type"`
-
-	// ID 请求 ID（用于匹配请求和响应）
-	ID string `json:"id,omitempty"`
-
-	// Method 方法名（对于 request 类型）
-	Method string `json:"method,omitempty"`
-
-	// Params 参数（对于 request 类型）
+	Type   string                 `json:"type"`
+	ID     string                 `json:"id,omitempty"`
+	Method string                 `json:"method,omitempty"`
 	Params map[string]interface{} `json:"params,omitempty"`
-
-	// Result 结果（对于 response 类型）
-	Result interface{} `json:"result,omitempty"`
-
-	// Error 错误信息
-	Error *MCPError `json:"error,omitempty"`
+	Result interface{}            `json:"result,omitempty"`
+	Error  *MCPError              `json:"error,omitempty"`
 }
 
 // MCPError MCP 错误
@@ -54,250 +549,12 @@ type MCPError struct {
 	Message string `json:"message"`
 }
 
-// handleSSE 处理 SSE 连接
-// GET /mcp/sse
-//
-// SSE 连接流程:
-// 1. 客户端建立 SSE 连接
-// 2. 服务器发送连接确认和能力列表
-// 3. 服务器通过心跳保持连接
-// 4. 服务器推送 MCP 工具列表
-func (s *Server) handleSSE(c *gin.Context) {
-	c.Header("Content-Type", "text/event-stream")
-	c.Header("Cache-Control", "no-cache")
-	c.Header("Connection", "keep-alive")
-	c.Header("Access-Control-Allow-Origin", "*")
-
-	// 发送连接确认
-	s.sendSSEEvent(c, SSEEvent{
-		Event: "connected",
-		Data: map[string]interface{}{
-			"message": "MCP SSE 连接已建立",
-			"version": "1.0.0",
-			"capabilities": map[string]interface{}{
-				"tools":  true,
-				"search": true,
-				"graph":  true,
-			},
-		},
-	})
-
-	// 发送可用工具列表
-	s.sendSSEEvent(c, SSEEvent{
-		Event: "tools",
-		Data: map[string]interface{}{
-			"tools": s.getMCPTools(),
-		},
-	})
-
-	ticker := time.NewTicker(15 * time.Second)
-	defer ticker.Stop()
-
-	clientGone := c.Request.Context().Done()
-
-	for {
-		select {
-		case <-clientGone:
-			s.log.Debug("SSE 客户端断开连接")
-			return
-
-		case <-ticker.C:
-			s.sendSSEEvent(c, SSEEvent{
-				Event: "heartbeat",
-				Data:  map[string]interface{}{"timestamp": time.Now().Unix()},
-			})
-		}
-	}
-}
-
-// getMCPTools 返回 MCP 可用工具列表
-func (s *Server) getMCPTools() []map[string]interface{} {
-	return []map[string]interface{}{
-		{
-			"name":        "search_semantic",
-			"description": "语义搜索代码实体",
-			"parameters": map[string]interface{}{
-				"query": "string - 搜索查询",
-				"top_k": "int - 返回数量",
-			},
-		},
-		{
-			"name":        "get_entity",
-			"description": "获取代码实体详情",
-			"parameters": map[string]interface{}{
-				"id": "string - 实体 ID",
-			},
-		},
-		{
-			"name":        "get_callchain",
-			"description": "获取紧凑调用链文本（推荐：比 JSON 节省 95% token）。depth=1 返回一行摘要，depth>1 返回树形展开",
-			"parameters": map[string]interface{}{
-				"id":    "string - 实体 ID（QualifiedName）",
-				"depth": "int - 遍历深度（默认 1）",
-			},
-		},
-		{
-			"name":        "get_graph_summary",
-			"description": "获取完整调用图的紧凑文本摘要（推荐：一次请求了解全部调用关系）。按文件分组的邻接表",
-			"parameters": map[string]interface{}{
-				"file": "string - 可选，按文件路径过滤",
-			},
-		},
-		{
-			"name":        "get_callmap",
-			"description": "获取调用关系图（JSON 详细格式，需要结构化数据时使用）",
-			"parameters": map[string]interface{}{
-				"id":    "string - 实体 ID",
-				"depth": "int - 遍历深度",
-			},
-		},
-		{
-			"name":        "get_callers",
-			"description": "获取调用者列表",
-			"parameters": map[string]interface{}{
-				"id":    "string - 实体 ID",
-				"depth": "int - 遍历深度",
-			},
-		},
-		{
-			"name":        "get_callees",
-			"description": "获取被调用者列表",
-			"parameters": map[string]interface{}{
-				"id":    "string - 实体 ID",
-				"depth": "int - 遍历深度",
-			},
-		},
-		{
-			"name":        "get_function_graph",
-			"description": "获取功能图谱",
-			"parameters": map[string]interface{}{
-				"type": "string - 节点类型过滤",
-				"file": "string - 文件路径过滤",
-			},
-		},
-		{
-			"name":        "get_subgraph",
-			"description": "获取以指定实体为中心的子图",
-			"parameters": map[string]interface{}{
-				"id":    "string - 中心实体 ID",
-				"depth": "int - 遍历深度",
-			},
-		},
-		{
-			"name":        "find_path",
-			"description": "查找两个实体之间的调用路径",
-			"parameters": map[string]interface{}{
-				"from": "string - 源实体 ID",
-				"to":   "string - 目标实体 ID",
-			},
-		},
-		{
-			"name":        "detect_cycles",
-			"description": "检测循环依赖",
-			"parameters": map[string]interface{}{},
-		},
-		{
-			"name":        "get_workspace",
-			"description": "获取工作区统计信息",
-			"parameters": map[string]interface{}{},
-		},
-	}
-}
-
-// sendSSEEvent 发送 SSE 事件
-// SSE 格式:
-// event: <event_name>
-// data: <json_data>
-func (s *Server) sendSSEEvent(c *gin.Context, event SSEEvent) {
-	data, err := json.Marshal(event.Data)
-	if err != nil {
-		s.log.Error("SSE JSON 序列化失败", "error", err)
-		return
-	}
-
-	// 写入事件类型（如果有）
-	if event.Event != "" {
-		fmt.Fprintf(c.Writer, "event: %s\n", event.Event)
-	}
-
-	// 写入数据
-	fmt.Fprintf(c.Writer, "data: %s\n\n", data)
-
-	// 刷新输出
-	c.Writer.Flush()
-}
-
-// sendMCPResponse 发送 MCP 响应
-func (s *Server) sendMCPResponse(c *gin.Context, id string, result interface{}) {
-	msg := MCPMessage{
-		Type:   "response",
-		ID:     id,
-		Result: result,
-	}
-
-	data, _ := json.Marshal(msg)
-	fmt.Fprintf(c.Writer, "data: %s\n\n", data)
-	c.Writer.Flush()
-}
-
-// sendMCPError 发送 MCP 错误
-func (s *Server) sendMCPError(c *gin.Context, id string, code int, message string) {
-	msg := MCPMessage{
-		Type: "response",
-		ID:   id,
-		Error: &MCPError{
-			Code:    code,
-			Message: message,
-		},
-	}
-
-	data, _ := json.Marshal(msg)
-	fmt.Fprintf(c.Writer, "data: %s\n\n", data)
-	c.Writer.Flush()
-}
-
-// StreamWriter 流式写入器接口
-// 用于流式返回大结果
-type StreamWriter struct {
-	writer  io.Writer
-	flusher interface{ Flush() }
-}
-
-// NewStreamWriter 创建流式写入器
-func NewStreamWriter(c *gin.Context) *StreamWriter {
-	return &StreamWriter{
-		writer:  c.Writer,
-		flusher: c.Writer,
-	}
-}
-
-// WriteEvent 写入事件
-func (sw *StreamWriter) WriteEvent(event string, data interface{}) error {
-	jsonData, err := json.Marshal(data)
-	if err != nil {
-		return err
-	}
-
-	if event != "" {
-		fmt.Fprintf(sw.writer, "event: %s\n", event)
-	}
-	fmt.Fprintf(sw.writer, "data: %s\n\n", jsonData)
-	sw.flusher.Flush()
-
-	return nil
-}
-
-// handleMCPRequest 处理 MCP 工具调用请求
+// handleMCPRequest 处理旧版 MCP 请求（保持兼容）
 // POST /mcp/request
 func (s *Server) handleMCPRequest(c *gin.Context) {
 	var msg MCPMessage
 	if err := c.ShouldBindJSON(&msg); err != nil {
 		c.JSON(400, gin.H{"error": "无效的 MCP 请求: " + err.Error()})
-		return
-	}
-
-	if msg.Type != "request" {
-		c.JSON(400, gin.H{"error": "仅接受 request 类型消息"})
 		return
 	}
 
@@ -313,11 +570,9 @@ func (s *Server) handleMCPRequest(c *gin.Context) {
 			topK = int(tk)
 		}
 		result, reqErr = s.store.SemanticSearch(ctx, query, topK)
-
 	case "get_entity":
 		id, _ := msg.Params["id"].(string)
 		result, reqErr = s.store.GetEntity(ctx, id)
-
 	case "get_callchain":
 		id, _ := msg.Params["id"].(string)
 		depth := 1
@@ -325,11 +580,9 @@ func (s *Server) handleMCPRequest(c *gin.Context) {
 			depth = int(d)
 		}
 		result, reqErr = s.store.CallChainCompact(ctx, id, depth)
-
 	case "get_graph_summary":
 		file, _ := msg.Params["file"].(string)
 		result, reqErr = s.store.CallGraphSummary(ctx, file)
-
 	case "get_callmap":
 		id, _ := msg.Params["id"].(string)
 		depth := 1
@@ -339,22 +592,17 @@ func (s *Server) handleMCPRequest(c *gin.Context) {
 		callers, _ := s.store.GetCallersOf(ctx, id, depth)
 		callees, _ := s.store.GetCalleesOf(ctx, id, depth)
 		result = map[string]interface{}{"callers": callers, "callees": callees}
-
 	case "get_workspace":
 		result, reqErr = s.store.Stats(ctx)
-
 	default:
 		reqErr = fmt.Errorf("未知的 MCP 方法: %s", msg.Method)
 	}
 
 	if reqErr != nil {
 		c.JSON(200, MCPMessage{
-			Type: "response",
-			ID:   msg.ID,
-			Error: &MCPError{
-				Code:    -1,
-				Message: reqErr.Error(),
-			},
+			Type:  "response",
+			ID:    msg.ID,
+			Error: &MCPError{Code: -1, Message: reqErr.Error()},
 		})
 		return
 	}
@@ -364,4 +612,27 @@ func (s *Server) handleMCPRequest(c *gin.Context) {
 		ID:     msg.ID,
 		Result: result,
 	})
+}
+
+// StreamWriter 流式写入器接口
+type StreamWriter struct {
+	writer  io.Writer
+	flusher interface{ Flush() }
+}
+
+func NewStreamWriter(c *gin.Context) *StreamWriter {
+	return &StreamWriter{writer: c.Writer, flusher: c.Writer}
+}
+
+func (sw *StreamWriter) WriteEvent(event string, data interface{}) error {
+	jsonData, err := json.Marshal(data)
+	if err != nil {
+		return err
+	}
+	if event != "" {
+		fmt.Fprintf(sw.writer, "event: %s\n", event)
+	}
+	fmt.Fprintf(sw.writer, "data: %s\n\n", jsonData)
+	sw.flusher.Flush()
+	return nil
 }

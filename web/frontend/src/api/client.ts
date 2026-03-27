@@ -66,3 +66,32 @@ export async function grepCode(pattern: string, filePattern?: string): Promise<G
   })
   return resp.data?.matches || []
 }
+
+// ========== 多仓库 API ==========
+
+export interface RepoInfo {
+  repo_id: string
+  repo_url?: string
+  repo_path: string
+  branch: string
+  indexed_at: string
+  key: string // repoID@branch
+}
+
+export async function listRepos(): Promise<RepoInfo[]> {
+  const resp = await fetchJSON<{ repos: RepoInfo[] }>('/api/v1/repos')
+  return resp.repos || []
+}
+
+export async function setActiveRepo(repoKey: string): Promise<void> {
+  await fetchJSON('/api/v1/repos/active', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ repo_key: repoKey }),
+  })
+}
+
+export async function getActiveRepo(): Promise<string> {
+  const resp = await fetchJSON<{ active_repo: string }>('/api/v1/repos/active')
+  return resp.active_repo || ''
+}
