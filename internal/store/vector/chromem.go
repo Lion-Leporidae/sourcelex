@@ -17,15 +17,12 @@ import (
 )
 
 // ChromemStore 是 chromem-go 向量数据库的实现
-// 使用本地文件存储，便于调试和验证
+// 使用内存 DB + 文件导出/导入实现持久化
 type ChromemStore struct {
-	// db chromem 数据库实例（持久化用）
-	db *chromem.DB
-
-	// memDB 内存数据库（索引写入期间使用，避免每次 AddDocuments 全量序列化）
+	// memDB 内存数据库实例
 	memDB *chromem.DB
 
-	// collection 当前使用的集合（指向 memDB 或 db 的集合）
+	// collection 当前使用的集合
 	collection *chromem.Collection
 
 	// collectionName 集合名称
@@ -64,15 +61,14 @@ func NewChromemStore(cfg ChromemConfig) (*ChromemStore, error) {
 		return nil, fmt.Errorf("创建向量存储目录失败: %w", err)
 	}
 
-	dbPath := filepath.Join(cfg.PersistPath, "chromem.db")
+	dbPath := filepath.Join(cfg.PersistPath, "chromem.gob")
 
 	// 检查是否有已存在的持久化数据
-	var db *chromem.DB
 	if _, err := os.Stat(dbPath); err == nil {
-		// 已有数据，加载持久化 DB 用于查询
-		db, err = chromem.NewPersistentDB(dbPath, false)
-		if err != nil {
-			return nil, fmt.Errorf("打开 chromem 数据库失败: %w", err)
+		// 已有数据，通过 ImportFromFile 加载到内存 DB
+		db := chromem.NewDB()
+		if err := db.ImportFromFile(dbPath, ""); err != nil {
+			return nil, fmt.Errorf("加载向量数据失败: %w", err)
 		}
 
 		collection, err := db.GetOrCreateCollection(
@@ -83,7 +79,7 @@ func NewChromemStore(cfg ChromemConfig) (*ChromemStore, error) {
 		}
 
 		return &ChromemStore{
-			db:             db,
+			memDB:          db,
 			collection:     collection,
 			collectionName: cfg.CollectionName,
 			persistPath:    cfg.PersistPath,
