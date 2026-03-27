@@ -202,13 +202,15 @@ func (ks *KnowledgeStore) StoreEntities(ctx context.Context, entities []entity.E
 
 		if embedErr != nil {
 			ks.log.Warn("批量嵌入失败，回退到逐条嵌入", "error", embedErr)
-			for _, item := range embedBatch {
+			for j, item := range embedBatch {
+				ks.log.Info("逐条嵌入中", "index", fmt.Sprintf("%d/%d", j+1, len(embedBatch)), "entity", item.entity.Name)
 				vec, err := ks.embedder.Embed(ctx, item.content)
 				if err != nil {
 					embedFailCount++
 					if firstError == "" {
 						firstError = err.Error()
 					}
+					ks.log.Warn("逐条嵌入失败", "entity", item.entity.Name, "error", err)
 					continue
 				}
 				docs = append(docs, ks.buildVectorDoc(item.entity, item.content, vec))

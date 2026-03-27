@@ -91,7 +91,7 @@ func NewHuggingFaceEmbedder(cfg HuggingFaceConfig) (*HuggingFaceEmbedder, error)
 		cfg.Dimension = 384 // all-MiniLM-L6-v2 的维度
 	}
 	if cfg.Timeout == 0 {
-		cfg.Timeout = 30 * time.Second
+		cfg.Timeout = 120 * time.Second // 大模型（如 bge-m3）需要更长超时
 	}
 
 	return &HuggingFaceEmbedder{

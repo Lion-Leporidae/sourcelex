@@ -219,114 +219,176 @@
     state.gElement = g;
 
     // Zoom
-    state.zoomBehavior = d3.zoom().scaleExtent([0.1, 5])
+    state.zoomBehavior = d3.zoom().scaleExtent([0.05, 5])
       .on("zoom", event => g.attr("transform", event.transform));
     svg.call(state.zoomBehavior);
 
-    // Filter valid edges
+    // ===== Group nodes by file =====
+    const fileGroups = {};
+    data.nodes.forEach(n => {
+      const f = n.file_path || "(unknown)";
+      if (!fileGroups[f]) fileGroups[f] = [];
+      fileGroups[f].push(n);
+    });
+
+    const fileNames = Object.keys(fileGroups).sort();
+    const nodeIdToFile = {};
+    data.nodes.forEach(n => { nodeIdToFile[n.id] = n.file_path || "(unknown)"; });
+
+    // Layout: arrange file boxes in a grid
+    const boxPadX = 16, boxPadY = 30, nodeH = 22, nodeW = 180;
+    const gapX = 60, gapY = 40;
+    const cols = Math.max(1, Math.ceil(Math.sqrt(fileNames.length)));
+
+    const fileBoxes = {}; // fileName -> { x, y, w, h, nodes: [{x,y,node}] }
+    let col = 0, row = 0, maxRowH = 0;
+    let cx = 30, cy = 30;
+
+    fileNames.forEach(fn => {
+      const nodes = fileGroups[fn];
+      const boxW = nodeW + boxPadX * 2;
+      const boxH = boxPadY + nodes.length * nodeH + 10;
+
+      if (col >= cols) { col = 0; row++; cx = 30; cy += maxRowH + gapY; maxRowH = 0; }
+
+      const box = { x: cx, y: cy, w: boxW, h: boxH, nodes: [] };
+      nodes.forEach((n, i) => {
+        const nx = cx + boxPadX + nodeW / 2;
+        const ny = cy + boxPadY + i * nodeH + nodeH / 2;
+        n.fx = nx; n.fy = ny; n.bx = cx; n.by = cy;
+        box.nodes.push({ x: nx, y: ny, node: n });
+      });
+      fileBoxes[fn] = box;
+      cx += boxW + gapX;
+      maxRowH = Math.max(maxRowH, boxH);
+      col++;
+    });
+
+    // Arrow defs
+    const defs = svg.append("defs");
+    defs.append("marker").attr("id", "arrow")
+      .attr("viewBox", "0 -5 10 10").attr("refX", 8).attr("refY", 0)
+      .attr("markerWidth", 6).attr("markerHeight", 6).attr("orient", "auto")
+      .append("path").attr("d", "M0,-3L8,0L0,3").attr("fill", "#484f58");
+    defs.append("marker").attr("id", "arrow-cross")
+      .attr("viewBox", "0 -5 10 10").attr("refX", 8).attr("refY", 0)
+      .attr("markerWidth", 6).attr("markerHeight", 6).attr("orient", "auto")
+      .append("path").attr("d", "M0,-3L8,0L0,3").attr("fill", "#f0883e");
+
+    // Draw file boxes
+    const fileBoxGroup = g.append("g").attr("class", "file-boxes");
+    fileNames.forEach(fn => {
+      const box = fileBoxes[fn];
+      const shortName = fn.split("/").pop();
+
+      fileBoxGroup.append("rect")
+        .attr("x", box.x).attr("y", box.y)
+        .attr("width", box.w).attr("height", box.h)
+        .attr("rx", 6).attr("ry", 6)
+        .attr("fill", "#161b22").attr("stroke", "#30363d").attr("stroke-width", 1);
+
+      fileBoxGroup.append("text")
+        .attr("x", box.x + 8).attr("y", box.y + 16)
+        .attr("fill", "#58a6ff").attr("font-size", "11px").attr("font-weight", "600")
+        .text(shortName)
+        .attr("cursor", "pointer")
+        .on("click", () => loadFileContent(fn));
+    });
+
+    // Filter valid edges + classify
     const nodeIds = new Set(data.nodes.map(n => n.id));
     const edges = data.edges.filter(e => nodeIds.has(e.source) && nodeIds.has(e.target));
 
-    // Build node file lookup for cross-file detection
-    const nodeFileMap = {};
-    data.nodes.forEach(n => { nodeFileMap[n.id] = n.file_path || ""; });
+    // Node id → position
+    const nodePos = {};
+    data.nodes.forEach(n => { nodePos[n.id] = { x: n.fx, y: n.fy }; });
 
-    // Arrow markers: normal + cross-file
-    const defs = svg.append("defs");
-    defs.append("marker").attr("id", "arrow")
-      .attr("viewBox", "0 -5 10 10").attr("refX", 20).attr("refY", 0)
-      .attr("markerWidth", 5).attr("markerHeight", 5).attr("orient", "auto")
-      .append("path").attr("d", "M0,-4L10,0L0,4").attr("fill", "#30363d");
-    defs.append("marker").attr("id", "arrow-cross")
-      .attr("viewBox", "0 -5 10 10").attr("refX", 20).attr("refY", 0)
-      .attr("markerWidth", 5).attr("markerHeight", 5).attr("orient", "auto")
-      .append("path").attr("d", "M0,-4L10,0L0,4").attr("fill", "#f0883e");
+    // Draw edges — curve for cross-file, straight for same-file
+    const linkGroup = g.append("g").attr("class", "links");
+    edges.forEach(e => {
+      const srcId = typeof e.source === "object" ? e.source.id : e.source;
+      const tgtId = typeof e.target === "object" ? e.target.id : e.target;
+      const src = nodePos[srcId], tgt = nodePos[tgtId];
+      if (!src || !tgt) return;
 
-    // Simulation
-    state.simulation = d3.forceSimulation(data.nodes)
-      .force("link", d3.forceLink(edges).id(d => d.id).distance(80))
-      .force("charge", d3.forceManyBody().strength(-200))
-      .force("center", d3.forceCenter(width / 2, height / 2))
-      .force("collision", d3.forceCollide().radius(20));
+      const srcFile = nodeIdToFile[srcId];
+      const tgtFile = nodeIdToFile[tgtId];
+      const isCross = srcFile !== tgtFile;
 
-    // Edges — cross-file edges are orange dashed
-    const link = g.append("g").selectAll("line").data(edges).join("line")
-      .attr("stroke", d => {
-        const srcFile = nodeFileMap[typeof d.source === "object" ? d.source.id : d.source] || "";
-        const tgtFile = nodeFileMap[typeof d.target === "object" ? d.target.id : d.target] || "";
-        return srcFile !== tgtFile ? "#f0883e" : "#30363d";
-      })
-      .attr("stroke-width", d => {
-        const srcFile = nodeFileMap[typeof d.source === "object" ? d.source.id : d.source] || "";
-        const tgtFile = nodeFileMap[typeof d.target === "object" ? d.target.id : d.target] || "";
-        return srcFile !== tgtFile ? 1.5 : 1;
-      })
-      .attr("stroke-dasharray", d => {
-        const srcFile = nodeFileMap[typeof d.source === "object" ? d.source.id : d.source] || "";
-        const tgtFile = nodeFileMap[typeof d.target === "object" ? d.target.id : d.target] || "";
-        return srcFile !== tgtFile ? "4,3" : "none";
-      })
-      .attr("marker-end", d => {
-        const srcFile = nodeFileMap[typeof d.source === "object" ? d.source.id : d.source] || "";
-        const tgtFile = nodeFileMap[typeof d.target === "object" ? d.target.id : d.target] || "";
-        return srcFile !== tgtFile ? "url(#arrow-cross)" : "url(#arrow)";
-      });
+      if (isCross) {
+        // Curved path for cross-file
+        const mx = (src.x + tgt.x) / 2;
+        const my = (src.y + tgt.y) / 2;
+        const dx = tgt.x - src.x, dy = tgt.y - src.y;
+        const dist = Math.sqrt(dx * dx + dy * dy);
+        const offset = Math.min(dist * 0.3, 80);
+        const nx = -dy / dist * offset, ny = dx / dist * offset;
 
-    // Nodes
-    const node = g.append("g").selectAll("circle").data(data.nodes).join("circle")
-      .attr("r", d => sizeMap[d.type] || 7)
-      .attr("fill", d => colorMap[d.type] || "#58a6ff")
-      .attr("stroke", "#0d1117").attr("stroke-width", 1.5)
-      .attr("cursor", "pointer")
-      .call(d3.drag().on("start", dragStart).on("drag", dragging).on("end", dragEnd));
+        linkGroup.append("path")
+          .attr("d", "M" + src.x + "," + src.y + " Q" + (mx + nx) + "," + (my + ny) + " " + tgt.x + "," + tgt.y)
+          .attr("fill", "none")
+          .attr("stroke", "#f0883e").attr("stroke-width", 1.5)
+          .attr("stroke-dasharray", "6,3")
+          .attr("marker-end", "url(#arrow-cross)")
+          .attr("opacity", 0.8)
+          .datum({ srcId, tgtId, isCross: true });
+      } else {
+        // Straight line for same-file
+        linkGroup.append("line")
+          .attr("x1", src.x).attr("y1", src.y)
+          .attr("x2", tgt.x).attr("y2", tgt.y)
+          .attr("stroke", "#484f58").attr("stroke-width", 0.8)
+          .attr("marker-end", "url(#arrow)")
+          .attr("opacity", 0.5)
+          .datum({ srcId, tgtId, isCross: false });
+      }
+    });
 
-    // Labels
-    const label = g.append("g").selectAll("text").data(data.nodes).join("text")
-      .text(d => d.name).attr("font-size", "10px").attr("fill", "#6e7681")
-      .attr("dx", 12).attr("dy", 3).attr("pointer-events", "none");
+    // Draw nodes (circles + labels)
+    const nodeGroup = g.append("g").attr("class", "nodes");
+    data.nodes.forEach(n => {
+      nodeGroup.append("circle")
+        .attr("cx", n.fx).attr("cy", n.fy)
+        .attr("r", sizeMap[n.type] || 6)
+        .attr("fill", colorMap[n.type] || "#58a6ff")
+        .attr("stroke", "#0d1117").attr("stroke-width", 1.5)
+        .attr("cursor", "pointer")
+        .datum(n)
+        .on("mouseover", function (event, d) {
+          tooltip.style("display", "block").html(
+            '<div class="tooltip-name">' + esc(d.name) + '</div>' +
+            '<div class="tooltip-type">' + esc(d.type) + '</div>' +
+            '<div class="tooltip-file">' + esc(d.file_path || "") + ':' + (d.start_line || "") + '</div>' +
+            (d.signature ? '<div class="tooltip-sig">' + esc(d.signature) + '</div>' : "")
+          );
+        })
+        .on("mousemove", function (event) {
+          tooltip.style("left", (event.pageX + 14) + "px").style("top", (event.pageY - 8) + "px");
+        })
+        .on("mouseout", function () { tooltip.style("display", "none"); })
+        .on("click", function (event, d) {
+          event.stopPropagation();
+          showNodePopup(d);
+        });
 
-    // Hover
-    node.on("mouseover", (event, d) => {
-      tooltip.style("display", "block").html(
-        '<div class="tooltip-name">' + esc(d.name) + '</div>' +
-        '<div class="tooltip-type">' + esc(d.type) + '</div>' +
-        '<div class="tooltip-file">' + esc(d.file_path || "") + ':' + (d.start_line || "") + '</div>' +
-        (d.signature ? '<div class="tooltip-sig">' + esc(d.signature) + '</div>' : "")
-      );
-    }).on("mousemove", event => {
-      tooltip.style("left", (event.pageX + 14) + "px").style("top", (event.pageY - 8) + "px");
-    }).on("mouseout", () => tooltip.style("display", "none"));
-
-    // Click
-    node.on("click", (event, d) => {
-      event.stopPropagation();
-      showNodePopup(d);
+      nodeGroup.append("text")
+        .attr("x", n.fx + (sizeMap[n.type] || 6) + 4).attr("y", n.fy + 4)
+        .attr("fill", "#8b949e").attr("font-size", "10px")
+        .attr("pointer-events", "none")
+        .text(n.name);
     });
 
     svg.on("click", () => closePopup());
 
-    // Tick
-    state.simulation.on("tick", () => {
-      link.attr("x1", d => d.source.x).attr("y1", d => d.source.y)
-        .attr("x2", d => d.target.x).attr("y2", d => d.target.y);
-      node.attr("cx", d => d.x).attr("cy", d => d.y);
-      label.attr("x", d => d.x).attr("y", d => d.y);
-    });
+    // Center view on content
+    const totalW = cx + 200, totalH = cy + maxRowH + 100;
+    const scaleX = width / totalW, scaleY = height / totalH;
+    const initScale = Math.min(scaleX, scaleY, 1) * 0.9;
+    svg.call(state.zoomBehavior.transform,
+      d3.zoomIdentity.translate(20, 20).scale(initScale));
 
-    function dragStart(event) {
-      if (!event.active) state.simulation.alphaTarget(0.3).restart();
-      event.subject.fx = event.subject.x;
-      event.subject.fy = event.subject.y;
-    }
-    function dragging(event) {
-      event.subject.fx = event.x;
-      event.subject.fy = event.y;
-    }
-    function dragEnd(event) {
-      if (!event.active) state.simulation.alphaTarget(0);
-      event.subject.fx = null;
-      event.subject.fy = null;
-    }
+    // No simulation needed — static layout
+    state.simulation = null;
   }
 
   // ===== Node Popup =====
@@ -374,38 +436,36 @@
   // ===== Highlight Related Nodes =====
   function highlightRelated(entityId, direction) {
     const url = direction === "callers"
-      ? "/api/v1/callers/" + encodeURIComponent(entityId) + "?depth=1"
-      : "/api/v1/callees/" + encodeURIComponent(entityId) + "?depth=1";
+      ? "/api/v1/callers/" + encodeURIComponent(entityId) + "?depth=2"
+      : "/api/v1/callees/" + encodeURIComponent(entityId) + "?depth=2";
 
     fetch(url).then(r => r.json()).then(resp => {
       if (!resp.success || !resp.data) return;
       const relatedIds = new Set(resp.data.map(n => n.id));
       relatedIds.add(entityId);
 
-      // Dim all, highlight related
-      d3.selectAll("#graph-svg circle")
-        .attr("opacity", d => relatedIds.has(d.id) ? 1 : 0.15)
-        .attr("r", d => relatedIds.has(d.id) ? (sizeMap[d.type] || 7) + 3 : sizeMap[d.type] || 7);
+      d3.selectAll(".nodes circle")
+        .attr("opacity", d => relatedIds.has(d.id) ? 1 : 0.12)
+        .attr("r", d => relatedIds.has(d.id) ? (sizeMap[d.type] || 6) + 3 : sizeMap[d.type] || 6)
+        .attr("stroke", d => d.id === entityId ? "#f0883e" : "#0d1117")
+        .attr("stroke-width", d => d.id === entityId ? 3 : 1.5);
 
-      d3.selectAll("#graph-svg line")
-        .attr("opacity", d => {
-          const src = typeof d.source === "object" ? d.source.id : d.source;
-          const tgt = typeof d.target === "object" ? d.target.id : d.target;
-          return relatedIds.has(src) && relatedIds.has(tgt) ? 1 : 0.05;
-        })
-        .attr("stroke", d => {
-          const src = typeof d.source === "object" ? d.source.id : d.source;
-          const tgt = typeof d.target === "object" ? d.target.id : d.target;
-          return relatedIds.has(src) && relatedIds.has(tgt) ? "#58a6ff" : "#30363d";
+      d3.selectAll(".nodes text")
+        .attr("opacity", d => relatedIds.has(d.id) ? 1 : 0.08);
+
+      d3.selectAll(".links path, .links line")
+        .attr("opacity", function () {
+          const dd = d3.select(this).datum();
+          if (!dd) return 0.05;
+          return relatedIds.has(dd.srcId) && relatedIds.has(dd.tgtId) ? 1 : 0.05;
         });
 
-      d3.selectAll("#graph-svg text")
-        .attr("opacity", d => relatedIds.has(d.id) ? 1 : 0.1);
+      d3.selectAll(".file-boxes rect").attr("opacity", 0.4);
+      d3.selectAll(".file-boxes text").attr("opacity", 0.4);
 
       document.getElementById("graph-title").textContent =
         direction === "callers" ? entityId + " 的调用者" : entityId + " 的被调用者";
 
-      // Click anywhere to reset
       d3.select("#graph-svg").on("click.reset", function () {
         resetHighlight();
         d3.select("#graph-svg").on("click.reset", null);
@@ -414,16 +474,17 @@
   }
 
   function resetHighlight() {
-    d3.selectAll("#graph-svg circle").attr("opacity", 1).attr("r", d => sizeMap[d.type] || 7);
-    d3.selectAll("#graph-svg line").attr("opacity", 1)
-      .attr("stroke", d => {
-        const src = typeof d.source === "object" ? d.source.id : d.source;
-        const tgt = typeof d.target === "object" ? d.target.id : d.target;
-        const srcFile = state.graphData ? (state.graphData.nodes.find(n => n.id === src) || {}).file_path : "";
-        const tgtFile = state.graphData ? (state.graphData.nodes.find(n => n.id === tgt) || {}).file_path : "";
-        return srcFile !== tgtFile ? "#f0883e" : "#30363d";
-      });
-    d3.selectAll("#graph-svg text").attr("opacity", 1);
+    d3.selectAll(".nodes circle")
+      .attr("opacity", 1)
+      .attr("r", d => sizeMap[d ? d.type : "function"] || 6)
+      .attr("stroke", "#0d1117").attr("stroke-width", 1.5);
+    d3.selectAll(".nodes text").attr("opacity", 1);
+    d3.selectAll(".links path, .links line").attr("opacity", function () {
+      const dd = d3.select(this).datum();
+      return dd && dd.isCross ? 0.8 : 0.5;
+    });
+    d3.selectAll(".file-boxes rect").attr("opacity", 1);
+    d3.selectAll(".file-boxes text").attr("opacity", 1);
     document.getElementById("graph-title").textContent = "调用图谱";
   }
 
@@ -453,34 +514,29 @@
       crossFileCallers.forEach(n => highlightIds.add(n.id));
       crossFileCallees.forEach(n => highlightIds.add(n.id));
 
-      d3.selectAll("#graph-svg circle")
+      d3.selectAll(".nodes circle")
         .attr("opacity", d => highlightIds.has(d.id) ? 1 : 0.1)
-        .attr("r", d => highlightIds.has(d.id) ? (sizeMap[d.type] || 7) + 4 : sizeMap[d.type] || 7)
+        .attr("r", d => highlightIds.has(d.id) ? (sizeMap[d.type] || 6) + 4 : sizeMap[d.type] || 6)
         .attr("stroke", d => d.id === entityId ? "#f0883e" : "#0d1117")
         .attr("stroke-width", d => d.id === entityId ? 3 : 1.5);
 
-      d3.selectAll("#graph-svg line")
-        .attr("opacity", d => {
-          const src = typeof d.source === "object" ? d.source.id : d.source;
-          const tgt = typeof d.target === "object" ? d.target.id : d.target;
-          return highlightIds.has(src) && highlightIds.has(tgt) ? 1 : 0.03;
+      d3.selectAll(".links path, .links line")
+        .attr("opacity", function () {
+          const dd = d3.select(this).datum();
+          if (!dd) return 0.03;
+          return highlightIds.has(dd.srcId) && highlightIds.has(dd.tgtId) ? 1 : 0.03;
         })
-        .attr("stroke", d => {
-          const src = typeof d.source === "object" ? d.source.id : d.source;
-          const tgt = typeof d.target === "object" ? d.target.id : d.target;
-          if (!highlightIds.has(src) || !highlightIds.has(tgt)) return "#30363d";
-          const srcNode = state.graphData.nodes.find(n => n.id === src);
-          const tgtNode = state.graphData.nodes.find(n => n.id === tgt);
-          return (srcNode && tgtNode && srcNode.file_path !== tgtNode.file_path) ? "#f0883e" : "#58a6ff";
-        })
-        .attr("stroke-width", d => {
-          const src = typeof d.source === "object" ? d.source.id : d.source;
-          const tgt = typeof d.target === "object" ? d.target.id : d.target;
-          return highlightIds.has(src) && highlightIds.has(tgt) ? 2.5 : 1;
+        .attr("stroke-width", function () {
+          const dd = d3.select(this).datum();
+          if (!dd) return 1;
+          return highlightIds.has(dd.srcId) && highlightIds.has(dd.tgtId) ? 2.5 : 1;
         });
 
-      d3.selectAll("#graph-svg text")
+      d3.selectAll(".nodes text")
         .attr("opacity", d => highlightIds.has(d.id) ? 1 : 0.05);
+
+      d3.selectAll(".file-boxes rect").attr("opacity", 0.3);
+      d3.selectAll(".file-boxes text").attr("opacity", 0.3);
 
       document.getElementById("graph-title").textContent =
         entityName + " 的跨文件调用链 (" + crossFileCallers.length + " 调用者, " + crossFileCallees.length + " 被调用)";
@@ -532,7 +588,7 @@
   function focusNode(entityId) {
     if (!state.graphData) return;
     const node = state.graphData.nodes.find(n => n.id === entityId);
-    if (node && node.x != null) {
+    if (node && node.fx != null) {
       const svg = d3.select("#graph-svg");
       const viewport = document.getElementById("graph-viewport");
       const w = viewport.clientWidth;
@@ -540,14 +596,14 @@
 
       svg.transition().duration(500).call(
         state.zoomBehavior.transform,
-        d3.zoomIdentity.translate(w / 2 - node.x * 1.5, h / 2 - node.y * 1.5).scale(1.5)
+        d3.zoomIdentity.translate(w / 2 - node.fx * 1.5, h / 2 - node.fy * 1.5).scale(1.5)
       );
 
       // Flash effect
-      d3.selectAll("#graph-svg circle")
+      d3.selectAll(".nodes circle")
         .filter(d => d.id === entityId)
-        .transition().duration(200).attr("r", 16)
-        .transition().duration(400).attr("r", sizeMap[node.type] || 7);
+        .transition().duration(200).attr("r", 14)
+        .transition().duration(400).attr("r", sizeMap[node.type] || 6);
 
       showNodePopup(node);
     }
