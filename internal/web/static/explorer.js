@@ -11,7 +11,7 @@
     gElement: null,
   };
 
-  const colorMap = { function: "#58a6ff", class: "#3fb950", method: "#bc8cff" };
+  const colorMap = { function: "#00d4ff", class: "#00ff88", method: "#a855f7" };
   const sizeMap = { function: 7, class: 11, method: 6 };
 
   // ===== Init =====
