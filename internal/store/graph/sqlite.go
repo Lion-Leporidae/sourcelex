@@ -133,6 +133,17 @@ func (s *SQLiteStore) initSchema() error {
 		return fmt.Errorf("创建 relationships 表失败: %w", err)
 	}
 
+	// 兼容旧数据库：为已存在的 relationships 表补充新列
+	migrations := []string{
+		"ALTER TABLE relationships ADD COLUMN source_file TEXT DEFAULT ''",
+		"ALTER TABLE relationships ADD COLUMN line INTEGER DEFAULT 0",
+		"ALTER TABLE relationships ADD COLUMN confidence REAL DEFAULT 0",
+	}
+	for _, m := range migrations {
+		// ALTER TABLE ADD COLUMN 在列已存在时会报错，忽略即可
+		s.db.Exec(m)
+	}
+
 	return nil
 }
 

@@ -17,7 +17,7 @@ export default function Entity() {
     if (!entityId) return
 
     getGraphData().then((data: GraphData) => {
-      const found = data.nodes.find(n => n.id === entityId)
+      const found = data?.nodes?.find(n => n.id === entityId)
       if (found) {
         setNode(found)
         getFileLines(found.file_path, found.start_line, found.end_line).then(setSource).catch(() => {})

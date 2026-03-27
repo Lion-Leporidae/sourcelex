@@ -4,6 +4,10 @@ const BASE = ''
 
 async function fetchJSON<T>(url: string, init?: RequestInit): Promise<T> {
   const res = await fetch(BASE + url, init)
+  if (!res.ok) {
+    const text = await res.text().catch(() => res.statusText)
+    throw new Error(`API error ${res.status}: ${text}`)
+  }
   const json = await res.json()
   return json as T
 }

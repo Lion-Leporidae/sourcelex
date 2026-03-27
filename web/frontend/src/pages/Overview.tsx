@@ -12,11 +12,11 @@ export default function Overview() {
     getGraphData().then(setGraphData).catch(() => {})
   }, [])
 
-  const fileCount = graphData
+  const fileCount = graphData?.nodes
     ? new Set(graphData.nodes.map(n => n.file_path)).size
     : 0
 
-  const topCallers = graphData ? (() => {
+  const topCallers = graphData?.edges ? (() => {
     const count: Record<string, number> = {}
     graphData.edges.forEach(e => {
       const src = typeof e.source === 'string' ? e.source : (e.source as any).id
@@ -65,7 +65,7 @@ export default function Overview() {
       </table>
 
       {/* Entity Type Distribution */}
-      {graphData && (
+      {graphData?.nodes && graphData.nodes.length > 0 && (
         <>
           <h2 className="wiki-h2">实体类型分布</h2>
           <table className="wiki-table">

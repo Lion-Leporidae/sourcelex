@@ -15,6 +15,7 @@ import (
 	"runtime"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/Lion-Leporidae/sourcelex/internal/analyzer/chunker"
@@ -148,6 +149,7 @@ func (ks *KnowledgeStore) StoreEntities(ctx context.Context, entities []entity.E
 
 	const embedBatchSize = 32
 	const maxRetries = 3
+	const maxConcurrent = 4 // 并发嵌入请求数
 
 	type embedItem struct {
 		entity  entity.Entity
@@ -161,84 +163,116 @@ func (ks *KnowledgeStore) StoreEntities(ctx context.Context, entities []entity.E
 		items = append(items, embedItem{entity: e, content: content})
 	}
 
-	totalSuccess := 0
-	embedFailCount := 0
-	firstError := ""
-
-	// 分批嵌入
-	for embedStart := 0; embedStart < len(items); embedStart += embedBatchSize {
-		embedEnd := embedStart + embedBatchSize
-		if embedEnd > len(items) {
-			embedEnd = len(items)
-		}
-		embedBatch := items[embedStart:embedEnd]
-
-		texts := make([]string, len(embedBatch))
-		for i, item := range embedBatch {
-			texts[i] = item.content
-		}
-
-		embedIdx := embedStart/embedBatchSize + 1
-		totalBatches := (len(items) + embedBatchSize - 1) / embedBatchSize
-		ks.log.Info("嵌入中",
-			"embed_batch", fmt.Sprintf("%d/%d", embedIdx, totalBatches),
-			"progress", fmt.Sprintf("%d/%d", embedEnd, len(entities)),
-		)
-
-		// 带重试的批量嵌入
-		embedStartTime := time.Now()
-		var vectors [][]float32
-		var embedErr error
-		for retry := 0; retry < maxRetries; retry++ {
-			vectors, embedErr = ks.embedder.EmbedBatch(ctx, texts)
-			if embedErr == nil {
-				break
-			}
-			ks.log.Warn("批量嵌入重试", "batch", embedIdx, "retry", retry+1, "error", embedErr)
-			time.Sleep(time.Duration(retry+1) * 2 * time.Second)
-		}
-
-		docs := make([]vector.Document, 0, len(embedBatch))
-
-		if embedErr != nil {
-			ks.log.Warn("批量嵌入失败，回退到逐条嵌入", "error", embedErr)
-			for j, item := range embedBatch {
-				ks.log.Info("逐条嵌入中", "index", fmt.Sprintf("%d/%d", j+1, len(embedBatch)), "entity", item.entity.Name)
-				vec, err := ks.embedder.Embed(ctx, item.content)
-				if err != nil {
-					embedFailCount++
-					if firstError == "" {
-						firstError = err.Error()
-					}
-					ks.log.Warn("逐条嵌入失败", "entity", item.entity.Name, "error", err)
-					continue
-				}
-				docs = append(docs, ks.buildVectorDoc(item.entity, item.content, vec))
-			}
-		} else {
-			for i, item := range embedBatch {
-				if i < len(vectors) && vectors[i] != nil {
-					docs = append(docs, ks.buildVectorDoc(item.entity, item.content, vectors[i]))
-				} else {
-					embedFailCount++
-				}
-			}
-		}
-
-		embedDuration := time.Since(embedStartTime)
-		ks.log.Info("嵌入批次完成",
-			"embed_batch", embedIdx,
-			"success", len(docs),
-			"duration", embedDuration.Round(time.Millisecond),
-		)
-
-		if len(docs) > 0 {
-			if err := ks.vectorStore.Upsert(ctx, docs); err != nil {
-				return fmt.Errorf("存储向量失败: %w", err)
-			}
-			totalSuccess += len(docs)
-		}
+	// 将 items 分批
+	type batch struct {
+		idx   int
+		items []embedItem
 	}
+	var batches []batch
+	for start := 0; start < len(items); start += embedBatchSize {
+		end := start + embedBatchSize
+		if end > len(items) {
+			end = len(items)
+		}
+		batches = append(batches, batch{idx: len(batches) + 1, items: items[start:end]})
+	}
+	totalBatches := len(batches)
+
+	// 并发嵌入结果
+	type batchResult struct {
+		docs      []vector.Document
+		failCount int
+		firstErr  string
+	}
+
+	var (
+		mu             sync.Mutex
+		totalSuccess   int
+		embedFailCount int
+		firstError     string
+	)
+
+	sem := make(chan struct{}, maxConcurrent)
+	var wg sync.WaitGroup
+	embedStartTime := time.Now()
+
+	for _, b := range batches {
+		wg.Add(1)
+		go func(b batch) {
+			defer wg.Done()
+			sem <- struct{}{}        // 获取并发槽
+			defer func() { <-sem }() // 释放并发槽
+
+			texts := make([]string, len(b.items))
+			for i, item := range b.items {
+				texts[i] = item.content
+			}
+
+			ks.log.Info("嵌入中",
+				"embed_batch", fmt.Sprintf("%d/%d", b.idx, totalBatches),
+				"size", len(b.items),
+			)
+
+			// 带重试的批量嵌入
+			var vectors [][]float32
+			var embedErr error
+			for retry := 0; retry < maxRetries; retry++ {
+				vectors, embedErr = ks.embedder.EmbedBatch(ctx, texts)
+				if embedErr == nil {
+					break
+				}
+				ks.log.Warn("批量嵌入重试", "batch", b.idx, "retry", retry+1, "error", embedErr)
+				time.Sleep(time.Duration(retry+1) * 2 * time.Second)
+			}
+
+			var res batchResult
+
+			if embedErr != nil {
+				ks.log.Warn("批量嵌入失败，回退到逐条嵌入", "batch", b.idx, "error", embedErr)
+				for _, item := range b.items {
+					vec, err := ks.embedder.Embed(ctx, item.content)
+					if err != nil {
+						res.failCount++
+						if res.firstErr == "" {
+							res.firstErr = err.Error()
+						}
+						continue
+					}
+					res.docs = append(res.docs, ks.buildVectorDoc(item.entity, item.content, vec))
+				}
+			} else {
+				for i, item := range b.items {
+					if i < len(vectors) && vectors[i] != nil {
+						res.docs = append(res.docs, ks.buildVectorDoc(item.entity, item.content, vectors[i]))
+					} else {
+						res.failCount++
+					}
+				}
+			}
+
+			// 写入向量库
+			if len(res.docs) > 0 {
+				if err := ks.vectorStore.Upsert(ctx, res.docs); err != nil {
+					ks.log.Warn("存储向量失败", "batch", b.idx, "error", err)
+					res.failCount += len(res.docs)
+					res.docs = nil
+				}
+			}
+
+			mu.Lock()
+			totalSuccess += len(res.docs)
+			embedFailCount += res.failCount
+			if firstError == "" && res.firstErr != "" {
+				firstError = res.firstErr
+			}
+			mu.Unlock()
+
+			ks.log.Info("嵌入批次完成", "embed_batch", b.idx, "success", len(res.docs))
+		}(b)
+	}
+
+	wg.Wait()
+	embedDuration := time.Since(embedStartTime)
 
 	// 清理
 	runtime.GC()
@@ -246,7 +280,7 @@ func (ks *KnowledgeStore) StoreEntities(ctx context.Context, entities []entity.E
 	if embedFailCount > 0 {
 		ks.log.Warn("部分实体嵌入失败", "failed", embedFailCount, "total", len(entities), "first_error", firstError)
 	}
-	ks.log.Info("嵌入完成", "success", totalSuccess, "total", len(entities))
+	ks.log.Info("嵌入完成", "success", totalSuccess, "total", len(entities), "duration", embedDuration.Round(time.Millisecond))
 
 	return nil
 }

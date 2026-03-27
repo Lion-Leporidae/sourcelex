@@ -38,6 +38,9 @@ type Extractor struct {
 
 	// scopeStack 作用域栈
 	scopeStack []string
+
+	// pkgName Go 包名（用于生成与实体一致的限定名）
+	pkgName string
 }
 
 // NewExtractor 创建调用关系提取器
@@ -269,8 +272,28 @@ func (e *Extractor) walkImportNodes(node *sitter.Node, callback func(*sitter.Nod
 // extractGo 提取 Go 调用关系
 func (e *Extractor) extractGo(root *sitter.Node) []CallRelation {
 	var relations []CallRelation
+	// 提取包名（与 entity.go 一致）
+	e.pkgName = e.extractGoPackageName(root)
 	e.extractGoRecursive(root, &relations)
 	return relations
+}
+
+// extractGoPackageName 从 Go AST 根节点提取包名
+func (e *Extractor) extractGoPackageName(root *sitter.Node) string {
+	for i := 0; i < int(root.ChildCount()); i++ {
+		child := root.Child(i)
+		if child.Type() == "package_clause" {
+			nameNode := child.ChildByFieldName("name")
+			if nameNode == nil {
+				if child.ChildCount() >= 2 {
+					return e.nodeContent(child.Child(1))
+				}
+			} else {
+				return e.nodeContent(nameNode)
+			}
+		}
+	}
+	return ""
 }
 
 // extractGoRecursive 递归提取 Go 调用关系
@@ -285,7 +308,12 @@ func (e *Extractor) extractGoRecursive(node *sitter.Node, relations *[]CallRelat
 	case "function_declaration":
 		nameNode := node.ChildByFieldName("name")
 		if nameNode != nil {
-			e.pushScope(e.nodeContent(nameNode))
+			funcName := e.nodeContent(nameNode)
+			// 与 entity.go 一致：非 main 包加包名前缀
+			if e.pkgName != "" && e.pkgName != "main" {
+				funcName = e.pkgName + "." + funcName
+			}
+			e.pushScope(funcName)
 			shouldPop = true
 		}
 	case "method_declaration":
@@ -298,6 +326,10 @@ func (e *Extractor) extractGoRecursive(node *sitter.Node, relations *[]CallRelat
 				if receiverType != "" {
 					methodName = receiverType + "." + methodName
 				}
+			}
+			// 与 entity.go 一致：非 main 包加包名前缀
+			if e.pkgName != "" && e.pkgName != "main" {
+				methodName = e.pkgName + "." + methodName
 			}
 			e.pushScope(methodName)
 			shouldPop = true
