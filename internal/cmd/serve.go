@@ -151,12 +151,20 @@ func runServe(cmd *cobra.Command, args []string) error {
 	}
 
 	// 创建 MCP 服务器
+	var repoPathForMCP string
+	if metaData, err := os.ReadFile(metaPath); err == nil {
+		var meta2 RepoMetadata
+		if json.Unmarshal(metaData, &meta2) == nil {
+			repoPathForMCP = meta2.RepoPath
+		}
+	}
 	server := mcp.New(mcp.Config{
-		Host:    serveHost,
-		Port:    servePort,
-		Store:   knowledgeStore,
-		GitRepo: gitRepo,
-		Log:     log,
+		Host:     serveHost,
+		Port:     servePort,
+		Store:    knowledgeStore,
+		GitRepo:  gitRepo,
+		Log:      log,
+		RepoPath: repoPathForMCP,
 	})
 
 	// 初始化 Agent（如果配置了 LLM Provider）

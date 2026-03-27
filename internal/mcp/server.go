@@ -49,15 +49,19 @@ type Server struct {
 
 	// port 监听端口
 	port int
+
+	// repoPath 仓库路径（用于 grep_code 和 read_file_lines）
+	repoPath string
 }
 
 // Config 服务器配置
 type Config struct {
-	Host    string
-	Port    int
-	Store   *store.KnowledgeStore
-	GitRepo *repogit.Repository
-	Log     *logger.Logger
+	Host     string
+	Port     int
+	Store    *store.KnowledgeStore
+	GitRepo  *repogit.Repository
+	Log      *logger.Logger
+	RepoPath string
 }
 
 // New 创建 MCP 服务器
@@ -88,12 +92,13 @@ func New(cfg Config) *Server {
 	router.Use(loggingMiddleware(cfg.Log)) // 请求日志
 
 	server := &Server{
-		router:  router,
-		store:   cfg.Store,
-		gitRepo: cfg.GitRepo,
-		log:     cfg.Log,
-		host:    cfg.Host,
-		port:    cfg.Port,
+		router:   router,
+		store:    cfg.Store,
+		gitRepo:  cfg.GitRepo,
+		log:      cfg.Log,
+		host:     cfg.Host,
+		port:     cfg.Port,
+		repoPath: cfg.RepoPath,
 	}
 
 	// 注册路由
@@ -145,6 +150,10 @@ func (s *Server) setupRoutes() {
 		v1.GET("/history/file", s.handleGetFileHistory)            // 文件变更历史
 		v1.GET("/history/blame", s.handleGetBlame)                 // 文件 Blame
 		v1.GET("/history/entity", s.handleGetEntityHistory)        // 实体变更历史
+
+		// 代码读取工具 (Code Access Tools) — 配合 RepoMap 语义搜索使用
+		v1.POST("/grep", s.handleGrepCode)                         // 在仓库中 grep 搜索代码
+		v1.GET("/file/lines", s.handleReadFileLines)               // 读取文件指定行范围
 	}
 
 	// MCP 协议端点

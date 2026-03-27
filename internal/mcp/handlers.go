@@ -3,9 +3,14 @@
 package mcp
 
 import (
+	"bufio"
 	"fmt"
 	"net/http"
+	"os"
+	"os/exec"
+	"path/filepath"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/gin-gonic/gin"
@@ -1331,6 +1336,209 @@ func (s *Server) handleGetEntityHistory(c *gin.Context) {
 			},
 			"commits": commitResponses,
 			"count":   len(commitResponses),
+		},
+	})
+}
+
+// ========== 代码读取工具 ==========
+
+// GrepRequest grep 搜索请求
+type GrepRequest struct {
+	Pattern     string `json:"pattern" binding:"required"`    // 搜索模式（正则表达式）
+	FilePattern string `json:"file_pattern,omitempty"`        // 文件 glob 过滤（如 "*.go"）
+	MaxResults  int    `json:"max_results,omitempty"`         // 最大结果数
+}
+
+// GrepMatch grep 匹配结果
+type GrepMatch struct {
+	FilePath   string `json:"file_path"`
+	LineNumber int    `json:"line_number"`
+	Content    string `json:"content"`
+}
+
+// handleGrepCode 在仓库中搜索代码
+// POST /api/v1/grep
+func (s *Server) handleGrepCode(c *gin.Context) {
+	var req GrepRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, APIResponse{
+			Success: false,
+			Error:   "无效的请求参数: " + err.Error(),
+		})
+		return
+	}
+
+	if s.repoPath == "" {
+		c.JSON(http.StatusServiceUnavailable, APIResponse{
+			Success: false,
+			Error:   "仓库路径未配置",
+		})
+		return
+	}
+
+	maxResults := req.MaxResults
+	if maxResults <= 0 {
+		maxResults = 50
+	}
+
+	// 使用 grep -rn 进行搜索
+	args := []string{"-rn", "--color=never", "-E"}
+
+	// 文件模式过滤
+	if req.FilePattern != "" {
+		args = append(args, "--include="+req.FilePattern)
+	}
+
+	// 排除隐藏目录和常见非代码目录
+	args = append(args, "--exclude-dir=.git", "--exclude-dir=node_modules", "--exclude-dir=vendor", "--exclude-dir=.sourcelex_cache*")
+
+	args = append(args, req.Pattern, ".")
+
+	cmd := exec.CommandContext(c.Request.Context(), "grep", args...)
+	cmd.Dir = s.repoPath
+
+	output, err := cmd.Output()
+	if err != nil {
+		// grep 返回 1 表示没有匹配，不是错误
+		if exitErr, ok := err.(*exec.ExitError); ok && exitErr.ExitCode() == 1 {
+			c.JSON(http.StatusOK, APIResponse{
+				Success: true,
+				Data: gin.H{
+					"matches": []GrepMatch{},
+					"count":   0,
+				},
+			})
+			return
+		}
+		c.JSON(http.StatusInternalServerError, APIResponse{
+			Success: false,
+			Error:   fmt.Sprintf("grep 执行失败: %v", err),
+		})
+		return
+	}
+
+	// 解析 grep 输出
+	var matches []GrepMatch
+	lines := strings.Split(string(output), "\n")
+	for _, line := range lines {
+		if line == "" {
+			continue
+		}
+		if len(matches) >= maxResults {
+			break
+		}
+
+		// 格式: ./file:line:content
+		parts := strings.SplitN(line, ":", 3)
+		if len(parts) < 3 {
+			continue
+		}
+
+		filePath := strings.TrimPrefix(parts[0], "./")
+		lineNum, _ := strconv.Atoi(parts[1])
+
+		matches = append(matches, GrepMatch{
+			FilePath:   filePath,
+			LineNumber: lineNum,
+			Content:    parts[2],
+		})
+	}
+
+	c.JSON(http.StatusOK, APIResponse{
+		Success: true,
+		Data: gin.H{
+			"matches": matches,
+			"count":   len(matches),
+			"pattern": req.Pattern,
+		},
+	})
+}
+
+// handleReadFileLines 读取文件指定行范围
+// GET /api/v1/file/lines?path=xxx&start=1&end=50
+func (s *Server) handleReadFileLines(c *gin.Context) {
+	filePath := c.Query("path")
+	if filePath == "" {
+		c.JSON(http.StatusBadRequest, APIResponse{
+			Success: false,
+			Error:   "参数 path 不能为空",
+		})
+		return
+	}
+
+	if s.repoPath == "" {
+		c.JSON(http.StatusServiceUnavailable, APIResponse{
+			Success: false,
+			Error:   "仓库路径未配置",
+		})
+		return
+	}
+
+	startLine, _ := strconv.Atoi(c.DefaultQuery("start", "1"))
+	endLine, _ := strconv.Atoi(c.DefaultQuery("end", "0"))
+	if startLine < 1 {
+		startLine = 1
+	}
+
+	// 安全检查：防止路径遍历攻击
+	absPath := filepath.Join(s.repoPath, filePath)
+	if !strings.HasPrefix(absPath, s.repoPath) {
+		c.JSON(http.StatusBadRequest, APIResponse{
+			Success: false,
+			Error:   "无效的文件路径",
+		})
+		return
+	}
+
+	file, err := os.Open(absPath)
+	if err != nil {
+		c.JSON(http.StatusNotFound, APIResponse{
+			Success: false,
+			Error:   fmt.Sprintf("打开文件失败: %v", err),
+		})
+		return
+	}
+	defer file.Close()
+
+	// 逐行读取
+	scanner := bufio.NewScanner(file)
+	buf := make([]byte, 0, 64*1024)
+	scanner.Buffer(buf, 1024*1024)
+
+	var lines []string
+	lineNum := 0
+	for scanner.Scan() {
+		lineNum++
+		if endLine > 0 && lineNum > endLine {
+			break
+		}
+		if lineNum >= startLine {
+			lines = append(lines, scanner.Text())
+		}
+	}
+
+	if err := scanner.Err(); err != nil {
+		c.JSON(http.StatusInternalServerError, APIResponse{
+			Success: false,
+			Error:   fmt.Sprintf("读取文件失败: %v", err),
+		})
+		return
+	}
+
+	actualEnd := startLine + len(lines) - 1
+	if len(lines) == 0 {
+		actualEnd = startLine
+	}
+
+	c.JSON(http.StatusOK, APIResponse{
+		Success: true,
+		Data: gin.H{
+			"path":       filePath,
+			"start_line": startLine,
+			"end_line":   actualEnd,
+			"total_lines": lineNum,
+			"content":    strings.Join(lines, "\n"),
+			"lines":      lines,
 		},
 	})
 }
