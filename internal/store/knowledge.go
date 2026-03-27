@@ -306,6 +306,7 @@ func (ks *KnowledgeStore) StoreRelations(ctx context.Context, relations []Relati
 			Type:       graph.EdgeType(r.Type),
 			SourceFile: r.SourceFile,
 			Line:       r.Line,
+			Confidence: r.Confidence,
 		})
 	}
 
@@ -316,9 +317,10 @@ func (ks *KnowledgeStore) StoreRelations(ctx context.Context, relations []Relati
 type Relation struct {
 	SourceID   string
 	TargetID   string
-	Type       string // calls, inherits, imports
-	SourceFile string // 调用发生的文件
-	Line       int    // 调用发生的行号
+	Type       string
+	SourceFile string
+	Line       int
+	Confidence float64
 }
 
 // SemanticSearch 语义搜索

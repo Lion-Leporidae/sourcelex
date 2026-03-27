@@ -16,20 +16,12 @@ import (
 
 // CallRelation 调用关系
 type CallRelation struct {
-	// CallerID 调用者 (qualified_name)
-	CallerID string `json:"caller_id"`
-
-	// CalleeID 被调用者 (可能是完全限定名或简单名)
-	CalleeID string `json:"callee_id"`
-
-	// CallerFile 调用者所在文件
-	CallerFile string `json:"caller_file"`
-
-	// Line 调用发生的行号
-	Line int `json:"line"`
-
-	// Column 调用发生的列号
-	Column int `json:"column"`
+	CallerID   string  `json:"caller_id"`
+	CalleeID   string  `json:"callee_id"`
+	CallerFile string  `json:"caller_file"`
+	Line       int     `json:"line"`
+	Column     int     `json:"column"`
+	Confidence float64 `json:"confidence"` // 0-1 置信度
 }
 
 // Extractor 调用关系提取器
@@ -353,15 +345,16 @@ func (e *Extractor) extractGoCall(node *sitter.Node) *CallRelation {
 		return nil
 	}
 
-	// 尝试解析完全限定名
-	calleeID := e.symbolTable.Resolve(calleeName, e.filePath)
+	// 尝试解析完全限定名（带置信度）
+	result := e.symbolTable.ResolveWithConfidence(calleeName, e.filePath)
 
 	return &CallRelation{
 		CallerID:   e.currentScope,
-		CalleeID:   calleeID,
+		CalleeID:   result.QualifiedName,
 		CallerFile: e.filePath,
 		Line:       int(node.StartPoint().Row) + 1,
 		Column:     int(node.StartPoint().Column),
+		Confidence: result.Confidence,
 	}
 }
 
@@ -427,14 +420,15 @@ func (e *Extractor) extractPythonCall(node *sitter.Node) *CallRelation {
 		return nil
 	}
 
-	calleeID := e.symbolTable.Resolve(calleeName, e.filePath)
+	calleeResult := e.symbolTable.ResolveWithConfidence(calleeName, e.filePath)
 
 	return &CallRelation{
 		CallerID:   e.currentScope,
-		CalleeID:   calleeID,
+		CalleeID:   calleeResult.QualifiedName,
 		CallerFile: e.filePath,
 		Line:       int(node.StartPoint().Row) + 1,
 		Column:     int(node.StartPoint().Column),
+		Confidence: calleeResult.Confidence,
 	}
 }
 
@@ -482,14 +476,15 @@ func (e *Extractor) extractJavaCall(node *sitter.Node) *CallRelation {
 		calleeName = e.nodeContent(objectNode) + "." + calleeName
 	}
 
-	calleeID := e.symbolTable.Resolve(calleeName, e.filePath)
+	javaResult := e.symbolTable.ResolveWithConfidence(calleeName, e.filePath)
 
 	return &CallRelation{
 		CallerID:   e.currentScope,
-		CalleeID:   calleeID,
+		CalleeID:   javaResult.QualifiedName,
 		CallerFile: e.filePath,
 		Line:       int(node.StartPoint().Row) + 1,
 		Column:     int(node.StartPoint().Column),
+		Confidence: javaResult.Confidence,
 	}
 }
 
@@ -541,14 +536,15 @@ func (e *Extractor) extractJSCall(node *sitter.Node) *CallRelation {
 		return nil
 	}
 
-	calleeID := e.symbolTable.Resolve(calleeName, e.filePath)
+	jsResult := e.symbolTable.ResolveWithConfidence(calleeName, e.filePath)
 
 	return &CallRelation{
 		CallerID:   e.currentScope,
-		CalleeID:   calleeID,
+		CalleeID:   jsResult.QualifiedName,
 		CallerFile: e.filePath,
 		Line:       int(node.StartPoint().Row) + 1,
 		Column:     int(node.StartPoint().Column),
+		Confidence: jsResult.Confidence,
 	}
 }
 

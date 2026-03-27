@@ -24,120 +24,163 @@ export default function Explorer() {
 
     const container = svgRef.current.parentElement!
     const width = container.clientWidth
-    const height = container.clientHeight
+    const height = container.clientHeight || 500
+
+    // Color & size
+    const colorMap: Record<string, string> = { function: '#3366cc', class: '#14866d', method: '#7b1fa2' }
+    const sizeMap: Record<string, number> = { function: 5, class: 9, method: 4 }
+
+    // Build file color palette (each file gets a soft hue)
+    const files = [...new Set(graphData.nodes.map(n => n.file_path))]
+    const fileColor: Record<string, string> = {}
+    files.forEach((f, i) => {
+      const hue = (i * 137.5) % 360 // golden angle distribution
+      fileColor[f] = `hsla(${hue}, 40%, 85%, 0.3)`
+    })
 
     const g = svg.append('g')
     const zoom = d3.zoom<SVGSVGElement, unknown>()
-      .scaleExtent([0.05, 4])
-      .on('zoom', event => g.attr('transform', event.transform))
+      .scaleExtent([0.1, 6])
+      .on('zoom', e => g.attr('transform', e.transform))
     svg.call(zoom)
 
-    // Group by file
-    const fileGroups: Record<string, GraphNode[]> = {}
-    graphData.nodes.forEach(n => {
-      const f = n.file_path || '(unknown)'
-      if (!fileGroups[f]) fileGroups[f] = []
-      fileGroups[f].push(n)
-    })
+    // Background gradient
+    const defs = svg.append('defs')
+    const radGrad = defs.append('radialGradient').attr('id', 'bg-glow')
+    radGrad.append('stop').attr('offset', '0%').attr('stop-color', '#e8edf2')
+    radGrad.append('stop').attr('offset', '100%').attr('stop-color', '#f8f9fa')
+    g.append('rect').attr('x', -2000).attr('y', -2000).attr('width', 4000).attr('height', 4000)
+      .attr('fill', 'url(#bg-glow)')
 
-    const fileNames = Object.keys(fileGroups).sort()
-    const nodeIdToFile: Record<string, string> = {}
-    graphData.nodes.forEach(n => { nodeIdToFile[n.id] = n.file_path || '' })
+    // Arrow
+    defs.append('marker').attr('id', 'arrow-conf')
+      .attr('viewBox', '0 -4 8 8').attr('refX', 16).attr('refY', 0)
+      .attr('markerWidth', 5).attr('markerHeight', 5).attr('orient', 'auto')
+      .append('path').attr('d', 'M0,-3L7,0L0,3').attr('fill', '#999')
 
-    const colorMap: Record<string, string> = { function: '#1565c0', class: '#2e7d32', method: '#7b1fa2' }
-    const sizeMap: Record<string, number> = { function: 5, class: 8, method: 4 }
-    const boxPadX = 14, boxPadY = 26, nodeH = 20, nodeW = 170
-    const gapX = 50, gapY = 35
-    const cols = Math.max(1, Math.ceil(Math.sqrt(fileNames.length)))
-
-    const nodePos: Record<string, { x: number; y: number }> = {}
-    let col = 0, cx = 20, cy = 20, maxRowH = 0
-
-    // Layout file boxes
-    const boxGroup = g.append('g')
-    const linkGroup = g.append('g')
-    const nodeGroup = g.append('g')
-
-    fileNames.forEach(fn => {
-      const nodes = fileGroups[fn]
-      const boxW = nodeW + boxPadX * 2
-      const boxH = boxPadY + nodes.length * nodeH + 8
-
-      if (col >= cols) { col = 0; cx = 20; cy += maxRowH + gapY; maxRowH = 0 }
-
-      // File box
-      boxGroup.append('rect')
-        .attr('x', cx).attr('y', cy)
-        .attr('width', boxW).attr('height', boxH)
-        .attr('rx', 3)
-        .attr('fill', '#fff').attr('stroke', '#c8ccd1').attr('stroke-width', 1)
-
-      boxGroup.append('text')
-        .attr('x', cx + 8).attr('y', cy + 16)
-        .attr('fill', '#0645ad').attr('font-size', '10px').attr('font-weight', '600')
-        .attr('font-family', 'Inter, sans-serif')
-        .text(fn.split('/').pop()!)
-        .attr('cursor', 'pointer')
-
-      nodes.forEach((n, i) => {
-        const nx = cx + boxPadX + nodeW / 2
-        const ny = cy + boxPadY + i * nodeH + nodeH / 2
-        nodePos[n.id] = { x: nx, y: ny }
-
-        nodeGroup.append('circle')
-          .attr('cx', nx).attr('cy', ny)
-          .attr('r', sizeMap[n.type] || 5)
-          .attr('fill', colorMap[n.type] || '#1565c0')
-          .attr('stroke', '#fff').attr('stroke-width', 1)
-          .attr('cursor', 'pointer')
-          .on('click', () => { window.location.href = `/entity/${encodeURIComponent(n.id)}` })
-
-        nodeGroup.append('text')
-          .attr('x', nx + (sizeMap[n.type] || 5) + 4).attr('y', ny + 3)
-          .attr('fill', '#202122').attr('font-size', '10px')
-          .attr('font-family', 'JetBrains Mono, monospace')
-          .text(n.name)
-          .attr('cursor', 'pointer')
-          .on('click', () => { window.location.href = `/entity/${encodeURIComponent(n.id)}` })
-      })
-
-      cx += boxW + gapX
-      maxRowH = Math.max(maxRowH, boxH)
-      col++
-    })
-
-    // Draw edges
+    // Prepare data
     const nodeIds = new Set(graphData.nodes.map(n => n.id))
-    graphData.edges.forEach(e => {
-      const srcId = typeof e.source === 'string' ? e.source : (e.source as any).id
-      const tgtId = typeof e.target === 'string' ? e.target : (e.target as any).id
-      if (!nodeIds.has(srcId) || !nodeIds.has(tgtId)) return
-      const src = nodePos[srcId], tgt = nodePos[tgtId]
-      if (!src || !tgt) return
+    const validEdges = graphData.edges.filter(e => nodeIds.has(e.source) && nodeIds.has(e.target))
 
-      const isCross = nodeIdToFile[srcId] !== nodeIdToFile[tgtId]
+    // Force simulation — galaxy style
+    const simulation = d3.forceSimulation(graphData.nodes as d3.SimulationNodeDatum[])
+      .force('link', d3.forceLink(validEdges).id((d: any) => d.id).distance(60).strength(0.3))
+      .force('charge', d3.forceManyBody().strength(-120))
+      .force('center', d3.forceCenter(width / 2, height / 2))
+      .force('collision', d3.forceCollide().radius(12))
+      .force('x', d3.forceX(width / 2).strength(0.03))
+      .force('y', d3.forceY(height / 2).strength(0.03))
 
-      if (isCross) {
-        const mx = (src.x + tgt.x) / 2, my = (src.y + tgt.y) / 2
-        const dx = tgt.x - src.x, dy = tgt.y - src.y
-        const dist = Math.sqrt(dx * dx + dy * dy) || 1
-        const off = Math.min(dist * 0.25, 60)
-        linkGroup.append('path')
-          .attr('d', `M${src.x},${src.y} Q${mx - dy / dist * off},${my + dx / dist * off} ${tgt.x},${tgt.y}`)
-          .attr('fill', 'none').attr('stroke', '#d33').attr('stroke-width', 1.2)
-          .attr('stroke-dasharray', '5,3').attr('opacity', 0.6)
-      } else {
-        linkGroup.append('line')
-          .attr('x1', src.x).attr('y1', src.y).attr('x2', tgt.x).attr('y2', tgt.y)
-          .attr('stroke', '#c8ccd1').attr('stroke-width', 0.6).attr('opacity', 0.4)
-      }
+    // Edges — opacity by confidence, dashed if cross-file
+    const nodeFileMap: Record<string, string> = {}
+    graphData.nodes.forEach(n => { nodeFileMap[n.id] = n.file_path })
+
+    const link = g.append('g').selectAll('line').data(validEdges).join('line')
+      .attr('stroke', d => {
+        const conf = d.confidence || 0.5
+        return conf > 0.7 ? '#666' : conf > 0.4 ? '#999' : '#ccc'
+      })
+      .attr('stroke-width', d => {
+        const conf = d.confidence || 0.5
+        return conf > 0.7 ? 1.2 : 0.7
+      })
+      .attr('stroke-opacity', d => Math.max(0.15, (d.confidence || 0.5)))
+      .attr('stroke-dasharray', d => {
+        const src = typeof d.source === 'string' ? d.source : (d.source as any).id
+        const tgt = typeof d.target === 'string' ? d.target : (d.target as any).id
+        return nodeFileMap[src] !== nodeFileMap[tgt] ? '4,3' : 'none'
+      })
+      .attr('marker-end', 'url(#arrow-conf)')
+
+    // File background clusters (soft colored regions)
+    // We'll update these on tick
+
+    // Nodes
+    const node = g.append('g').selectAll('circle').data(graphData.nodes).join('circle')
+      .attr('r', d => sizeMap[d.type] || 5)
+      .attr('fill', d => colorMap[d.type] || '#3366cc')
+      .attr('stroke', d => fileColor[d.file_path] ? '#fff' : '#eee')
+      .attr('stroke-width', 1)
+      .attr('cursor', 'pointer')
+      .call(d3.drag<any, any>()
+        .on('start', (event, d) => { if (!event.active) simulation.alphaTarget(0.3).restart(); d.fx = d.x; d.fy = d.y })
+        .on('drag', (event, d) => { d.fx = event.x; d.fy = event.y })
+        .on('end', (event, d) => { if (!event.active) simulation.alphaTarget(0); d.fx = null; d.fy = null })
+      )
+
+    // Labels (only show for larger nodes or on hover)
+    const label = g.append('g').selectAll('text').data(graphData.nodes).join('text')
+      .text(d => d.name)
+      .attr('font-size', '9px')
+      .attr('fill', '#555')
+      .attr('font-family', 'JetBrains Mono, monospace')
+      .attr('text-anchor', 'middle')
+      .attr('dy', d => -(sizeMap[d.type] || 5) - 4)
+      .attr('pointer-events', 'none')
+      .attr('opacity', d => d.type === 'class' ? 0.9 : 0.4)
+
+    // Tooltip
+    let tooltip = d3.select('.graph-tooltip') as any
+    if (tooltip.empty()) {
+      tooltip = d3.select('body').append('div')
+        .attr('class', 'graph-tooltip')
+        .style('display', 'none')
+        .style('position', 'absolute')
+        .style('background', '#fff')
+        .style('border', '1px solid #c8ccd1')
+        .style('border-radius', '4px')
+        .style('padding', '8px 12px')
+        .style('font-size', '12px')
+        .style('box-shadow', '0 2px 8px rgba(0,0,0,0.1)')
+        .style('z-index', '50')
+        .style('pointer-events', 'none')
+        .style('max-width', '300px') as any
+    }
+
+    node.on('mouseover', (event, d) => {
+      tooltip.style('display', 'block').html(
+        `<strong>${d.name}</strong><br/>` +
+        `<span style="color:#72777d">${d.type} · ${d.file_path}:${d.start_line}</span>` +
+        (d.signature ? `<br/><code style="font-size:11px;color:#3366cc">${d.signature}</code>` : '')
+      )
+      // Highlight connected
+      d3.selectAll('circle').attr('opacity', 0.15)
+      d3.select(event.target).attr('opacity', 1).attr('r', (sizeMap[d.type] || 5) + 3)
+      const connected = new Set<string>()
+      validEdges.forEach(e => {
+        const src = typeof e.source === 'string' ? e.source : (e.source as any).id
+        const tgt = typeof e.target === 'string' ? e.target : (e.target as any).id
+        if (src === d.id) connected.add(tgt)
+        if (tgt === d.id) connected.add(src)
+      })
+      d3.selectAll('circle').filter((n: any) => connected.has(n.id)).attr('opacity', 1)
+      link.attr('stroke-opacity', (e: any) => {
+        const src = typeof e.source === 'string' ? e.source : e.source.id
+        const tgt = typeof e.target === 'string' ? e.target : e.target.id
+        return src === d.id || tgt === d.id ? 0.8 : 0.03
+      })
+      label.attr('opacity', (n: any) => n.id === d.id || connected.has(n.id) ? 1 : 0.1)
+    }).on('mousemove', event => {
+      tooltip.style('left', (event.pageX + 12) + 'px').style('top', (event.pageY - 8) + 'px')
+    }).on('mouseout', () => {
+      tooltip.style('display', 'none')
+      d3.selectAll('circle').attr('opacity', 1).attr('r', (d: any) => sizeMap[d.type] || 5)
+      link.attr('stroke-opacity', (d: any) => Math.max(0.15, (d.confidence || 0.5)))
+      label.attr('opacity', (d: any) => d.type === 'class' ? 0.9 : 0.4)
     })
 
-    // Fit view
-    const totalW = cx + 200, totalH = cy + maxRowH + 100
-    const scaleX = width / totalW, scaleY = height / totalH
-    const initScale = Math.min(scaleX, scaleY, 1) * 0.85
-    svg.call(zoom.transform, d3.zoomIdentity.translate(10, 10).scale(initScale))
+    node.on('click', (_, d) => {
+      window.location.href = `/entity/${encodeURIComponent(d.id)}`
+    })
+
+    // Tick
+    simulation.on('tick', () => {
+      link
+        .attr('x1', (d: any) => d.source.x).attr('y1', (d: any) => d.source.y)
+        .attr('x2', (d: any) => d.target.x).attr('y2', (d: any) => d.target.y)
+      node.attr('cx', (d: any) => d.x).attr('cy', (d: any) => d.y)
+      label.attr('x', (d: any) => d.x).attr('y', (d: any) => d.y)
+    })
   }, [graphData])
 
   useEffect(() => { renderGraph() }, [renderGraph])
@@ -194,21 +237,24 @@ export default function Explorer() {
       )}
 
       {/* Legend */}
-      <div style={{ display: 'flex', gap: 16, fontSize: 12, color: '#72777d', marginBottom: 8, alignItems: 'center' }}>
+      <div style={{ display: 'flex', gap: 16, fontSize: 12, color: '#72777d', marginBottom: 8, alignItems: 'center', flexWrap: 'wrap' }}>
         <span style={{ display: 'flex', alignItems: 'center', gap: 4 }}>
-          <span style={{ width: 8, height: 8, borderRadius: '50%', background: '#1565c0', display: 'inline-block' }} />函数
+          <span style={{ width: 8, height: 8, borderRadius: '50%', background: '#3366cc', display: 'inline-block' }} />函数
         </span>
         <span style={{ display: 'flex', alignItems: 'center', gap: 4 }}>
-          <span style={{ width: 8, height: 8, borderRadius: '50%', background: '#2e7d32', display: 'inline-block' }} />类
+          <span style={{ width: 8, height: 8, borderRadius: '50%', background: '#14866d', display: 'inline-block' }} />类
         </span>
         <span style={{ display: 'flex', alignItems: 'center', gap: 4 }}>
           <span style={{ width: 8, height: 8, borderRadius: '50%', background: '#7b1fa2', display: 'inline-block' }} />方法
         </span>
         <span style={{ display: 'flex', alignItems: 'center', gap: 4 }}>
-          <span style={{ width: 16, height: 0, borderTop: '2px dashed #d33', display: 'inline-block' }} />跨文件调用
+          <span style={{ width: 16, height: 0, borderTop: '2px dashed #999', display: 'inline-block' }} />跨文件调用
         </span>
         <span style={{ display: 'flex', alignItems: 'center', gap: 4 }}>
-          <span style={{ width: 16, height: 2, background: '#c8ccd1', display: 'inline-block' }} />同文件调用
+          <span style={{ width: 16, height: 2, background: '#666', display: 'inline-block' }} />高置信度
+        </span>
+        <span style={{ display: 'flex', alignItems: 'center', gap: 4 }}>
+          <span style={{ width: 16, height: 1, background: '#ccc', display: 'inline-block' }} />低置信度
         </span>
       </div>
 

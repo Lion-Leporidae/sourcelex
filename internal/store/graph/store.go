@@ -92,6 +92,9 @@ type Edge struct {
 	// Line 调用发生的行号
 	Line int `json:"line,omitempty"`
 
+	// Confidence 调用关系置信度 (0-1)
+	Confidence float64 `json:"confidence,omitempty"`
+
 	// Metadata 额外元数据
 	Metadata map[string]interface{} `json:"metadata,omitempty"`
 }

@@ -281,6 +281,7 @@ func runStore(cmd *cobra.Command, args []string) error {
 				Type:       "calls",
 				SourceFile: r.CallerFile,
 				Line:       r.Line,
+				Confidence: r.Confidence,
 			})
 		}
 		result.Relations = nil

@@ -134,9 +134,12 @@ type nodeInfo struct {
 }
 
 type edgeInfo struct {
-	Source string `json:"source"`
-	Target string `json:"target"`
-	Type   string `json:"type"`
+	Source     string  `json:"source"`
+	Target     string  `json:"target"`
+	Type       string  `json:"type"`
+	SourceFile string  `json:"source_file,omitempty"`
+	Line       int     `json:"line,omitempty"`
+	Confidence float64 `json:"confidence,omitempty"`
 }
 
 // --- handlers ---
@@ -265,9 +268,12 @@ func convertEdges(edges []graph.Edge) []edgeInfo {
 	result := make([]edgeInfo, len(edges))
 	for i, e := range edges {
 		result[i] = edgeInfo{
-			Source: e.Source,
-			Target: e.Target,
-			Type:   string(e.Type),
+			Source:     e.Source,
+			Target:     e.Target,
+			Type:       string(e.Type),
+			SourceFile: e.SourceFile,
+			Line:       e.Line,
+			Confidence: e.Confidence,
 		}
 	}
 	return result

@@ -22,6 +22,7 @@ export interface GraphEdge {
   type: string
   source_file?: string
   line?: number
+  confidence?: number
 }
 
 export interface GraphData {

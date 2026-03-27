@@ -187,3 +187,84 @@ func (st *SymbolTable) Size() int {
 	defer st.mu.RUnlock()
 	return len(st.globalSymbols)
 }
+
+// ResolveResult 解析结果（含置信度）
+type ResolveResult struct {
+	QualifiedName string
+	Confidence    float64 // 0-1
+}
+
+// ResolveWithConfidence 解析符号名并返回置信度
+// 置信度评分规则:
+//   - 1.0: 文件局部符号精确匹配
+//   - 0.9: 全局符号精确匹配（限定名完全一致）
+//   - 0.8: 通过 import 映射成功解析
+//   - 0.7: 类型前缀匹配（Type.Method）
+//   - 0.5: 简单名多值匹配（同目录优先）
+//   - 0.3: 简单名多值匹配（跨目录）
+//   - 0.1: 完全未解析（返回原名）
+func (st *SymbolTable) ResolveWithConfidence(name, fromFile string) ResolveResult {
+	st.mu.RLock()
+	defer st.mu.RUnlock()
+
+	// 1. 文件局部符号
+	if fileMap, ok := st.fileSymbols[fromFile]; ok {
+		if qn, ok := fileMap[name]; ok {
+			return ResolveResult{qn, 1.0}
+		}
+	}
+
+	// 2. 精确匹配全局符号
+	if qn, ok := st.globalSymbols[name]; ok {
+		return ResolveResult{qn, 0.9}
+	}
+
+	// 3. 带点名称
+	parts := strings.SplitN(name, ".", 2)
+	if len(parts) == 2 {
+		prefix, suffix := parts[0], parts[1]
+
+		// 3a. import 映射
+		if imports, ok := st.imports[fromFile]; ok {
+			if module, ok := imports[prefix]; ok {
+				candidate := module + "." + suffix
+				if _, ok := st.globalSymbols[candidate]; ok {
+					return ResolveResult{candidate, 0.85}
+				}
+				moduleParts := strings.Split(module, "/")
+				pkgName := moduleParts[len(moduleParts)-1]
+				candidate = pkgName + "." + suffix
+				if _, ok := st.globalSymbols[candidate]; ok {
+					return ResolveResult{candidate, 0.8}
+				}
+				return ResolveResult{candidate, 0.6}
+			}
+		}
+
+		// 3b. 类型前缀
+		if candidates, ok := st.nameToQualified[prefix]; ok && len(candidates) > 0 {
+			return ResolveResult{candidates[0] + "." + suffix, 0.7}
+		}
+		if qn, ok := st.globalSymbols[prefix]; ok {
+			return ResolveResult{qn + "." + suffix, 0.7}
+		}
+	}
+
+	// 4. 简单名多值
+	if candidates, ok := st.nameToQualified[name]; ok && len(candidates) > 0 {
+		fromDir := fileDir(fromFile)
+		for _, qn := range candidates {
+			for file, fileMap := range st.fileSymbols {
+				for _, fqn := range fileMap {
+					if fqn == qn && fileDir(file) == fromDir {
+						return ResolveResult{qn, 0.5}
+					}
+				}
+			}
+		}
+		return ResolveResult{candidates[0], 0.3}
+	}
+
+	// 5. 未解析
+	return ResolveResult{name, 0.1}
+}
