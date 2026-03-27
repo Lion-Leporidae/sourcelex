@@ -220,8 +220,8 @@ func (e *HuggingFaceEmbedder) EmbedBatch(ctx context.Context, texts []string) ([
 		return nil, nil
 	}
 
-	// 构建请求
-	url := fmt.Sprintf("%s/%s", e.baseURL, e.modelID)
+	// 构建请求（使用与 Embed 相同的 feature-extraction pipeline 端点）
+	url := fmt.Sprintf("%s/%s/pipeline/feature-extraction", e.baseURL, e.modelID)
 	reqBody := map[string]interface{}{
 		"inputs": texts,
 		"options": map[string]interface{}{

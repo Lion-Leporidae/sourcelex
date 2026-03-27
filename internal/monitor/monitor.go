@@ -142,7 +142,13 @@ func (m *ResourceMonitor) Collect() (*Stats, error) {
 	// 2. 进程 CPU 和内存
 	cpuPercent, err := m.proc.CPUPercent()
 	if err == nil {
-		stats.ProcessCPUPercent = cpuPercent
+		// gopsutil 返回多核累加值（N核最大N×100%），除以核心数归一化到 0-100%
+		numCPU := float64(runtime.NumCPU())
+		if numCPU > 0 {
+			stats.ProcessCPUPercent = cpuPercent / numCPU
+		} else {
+			stats.ProcessCPUPercent = cpuPercent
+		}
 	}
 
 	memInfo, err := m.proc.MemoryInfo()

@@ -19,10 +19,13 @@ import (
 // ChromemStore 是 chromem-go 向量数据库的实现
 // 使用本地文件存储，便于调试和验证
 type ChromemStore struct {
-	// db chromem 数据库实例
+	// db chromem 数据库实例（持久化用）
 	db *chromem.DB
 
-	// collection 当前使用的集合
+	// memDB 内存数据库（索引写入期间使用，避免每次 AddDocuments 全量序列化）
+	memDB *chromem.DB
+
+	// collection 当前使用的集合（指向 memDB 或 db 的集合）
 	collection *chromem.Collection
 
 	// collectionName 集合名称
@@ -31,8 +34,14 @@ type ChromemStore struct {
 	// persistPath 数据持久化路径
 	persistPath string
 
+	// dbPath 数据库文件路径
+	dbPath string
+
 	// vectorDim 向量维度
 	vectorDim int
+
+	// dirty 是否有未持久化的写入
+	dirty bool
 }
 
 // ChromemConfig chromem 存储配置
@@ -48,56 +57,62 @@ type ChromemConfig struct {
 }
 
 // NewChromemStore 创建 chromem 向量存储实例
-// 参数:
-//   - cfg: chromem 配置
-//
-// 返回:
-//   - *ChromemStore: 存储实例
-//   - error: 初始化错误
-//
-// 使用示例:
-//
-//	store, err := NewChromemStore(ChromemConfig{
-//	    PersistPath:    "./data/vectors",
-//	    CollectionName: "code_vectors",
-//	    VectorDim:      384,
-//	})
+// 索引写入期间使用内存 DB（快速），Close 时一次性持久化到磁盘
 func NewChromemStore(cfg ChromemConfig) (*ChromemStore, error) {
 	// 确保持久化目录存在
 	if err := os.MkdirAll(cfg.PersistPath, 0755); err != nil {
 		return nil, fmt.Errorf("创建向量存储目录失败: %w", err)
 	}
 
-	// 创建或打开数据库
-	// chromem-go 使用 gob 格式持久化数据
 	dbPath := filepath.Join(cfg.PersistPath, "chromem.db")
-	db, err := chromem.NewPersistentDB(dbPath, false)
-	if err != nil {
-		return nil, fmt.Errorf("打开 chromem 数据库失败: %w", err)
+
+	// 检查是否有已存在的持久化数据
+	var db *chromem.DB
+	if _, err := os.Stat(dbPath); err == nil {
+		// 已有数据，加载持久化 DB 用于查询
+		db, err = chromem.NewPersistentDB(dbPath, false)
+		if err != nil {
+			return nil, fmt.Errorf("打开 chromem 数据库失败: %w", err)
+		}
+
+		collection, err := db.GetOrCreateCollection(
+			cfg.CollectionName, nil, nil,
+		)
+		if err != nil {
+			return nil, fmt.Errorf("获取集合失败: %w", err)
+		}
+
+		return &ChromemStore{
+			db:             db,
+			collection:     collection,
+			collectionName: cfg.CollectionName,
+			persistPath:    cfg.PersistPath,
+			dbPath:         dbPath,
+			vectorDim:      cfg.VectorDim,
+		}, nil
 	}
 
-	// 获取或创建集合
-	// chromem 使用集合来组织不同类型的向量
-	collection, err := db.GetOrCreateCollection(
-		cfg.CollectionName,
-		nil, // 使用外部嵌入器，不使用 chromem 内置的
-		nil, // 无距离函数覆盖，使用默认余弦相似度
+	// 没有已有数据：创建内存 DB 用于快速写入
+	memDB := chromem.NewDB()
+	collection, err := memDB.GetOrCreateCollection(
+		cfg.CollectionName, nil, nil,
 	)
 	if err != nil {
-		return nil, fmt.Errorf("创建集合失败: %w", err)
+		return nil, fmt.Errorf("创建内存集合失败: %w", err)
 	}
 
 	return &ChromemStore{
-		db:             db,
+		memDB:          memDB,
 		collection:     collection,
 		collectionName: cfg.CollectionName,
 		persistPath:    cfg.PersistPath,
+		dbPath:         dbPath,
 		vectorDim:      cfg.VectorDim,
 	}, nil
 }
 
 // Upsert 插入或更新文档
-// 将文档存储到 chromem 集合中
+// 写入内存 DB（无磁盘 IO），Close 时一次性持久化
 func (s *ChromemStore) Upsert(ctx context.Context, docs []Document) error {
 	if len(docs) == 0 {
 		return nil
@@ -106,11 +121,6 @@ func (s *ChromemStore) Upsert(ctx context.Context, docs []Document) error {
 	// 转换为 chromem 文档格式
 	chromemDocs := make([]chromem.Document, len(docs))
 	for i, doc := range docs {
-		// chromem 文档包含:
-		// - ID: 唯一标识符
-		// - Content: 原始内容（用于显示）
-		// - Embedding: 向量（用于搜索）
-		// - Metadata: 元数据
 		chromemDocs[i] = chromem.Document{
 			ID:        doc.ID,
 			Content:   doc.Content,
@@ -119,12 +129,12 @@ func (s *ChromemStore) Upsert(ctx context.Context, docs []Document) error {
 		}
 	}
 
-	// 批量添加文档
-	// chromem 的 AddDocuments 是幂等的，重复 ID 会更新
+	// 添加到集合（内存 DB 模式下无磁盘 IO，非常快）
 	if err := s.collection.AddDocuments(ctx, chromemDocs, runtime.NumCPU()); err != nil {
 		return fmt.Errorf("添加文档失败: %w", err)
 	}
 
+	s.dirty = true
 	return nil
 }
 
@@ -203,10 +213,15 @@ func (s *ChromemStore) Count(ctx context.Context) (int64, error) {
 	return int64(s.collection.Count()), nil
 }
 
-// Close 关闭连接
-// chromem 的持久化是自动的，无需显式关闭
+// Close 关闭连接并持久化数据
+// 如果使用了内存 DB 且有写入，将数据导出到持久化 DB
 func (s *ChromemStore) Close() error {
-	// chromem-go 使用 PersistentDB 时会自动持久化
-	// 无需显式关闭操作
+	if s.memDB != nil && s.dirty {
+		// 将内存 DB 一次性导出到持久化文件
+		if err := s.memDB.ExportToFile(s.dbPath, false, ""); err != nil {
+			return fmt.Errorf("持久化向量数据失败: %w", err)
+		}
+	}
+
 	return nil
 }
