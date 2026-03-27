@@ -12,11 +12,14 @@ package store
 import (
 	"context"
 	"fmt"
+	"runtime"
 	"sort"
 	"strings"
+	"time"
 
 	"github.com/Lion-Leporidae/sourcelex/internal/analyzer/chunker"
 	"github.com/Lion-Leporidae/sourcelex/internal/analyzer/entity"
+	"github.com/Lion-Leporidae/sourcelex/internal/analyzer/relation"
 	"github.com/Lion-Leporidae/sourcelex/internal/logger"
 	"github.com/Lion-Leporidae/sourcelex/internal/store/graph"
 	"github.com/Lion-Leporidae/sourcelex/internal/store/vector"
@@ -78,36 +81,15 @@ func New(cfg Config) *KnowledgeStore {
 	}
 }
 
-// StoreEntities 存储实体列表
-// 将 CodeAnalyzer 提取的实体存储到知识库中
-// 流程:
-// 1. 使用 SymbolChunker 将实体转换为代码分块
-// 2. 存储图节点
-// 3. 为每个分块生成嵌入向量并存储
-// 注意: 即使嵌入失败，图节点也会被存储
-func (ks *KnowledgeStore) StoreEntities(ctx context.Context, entities []entity.Entity) error {
+// StoreEntities 存储实体列表（RepoMap 模式）
+// 向量库只存函数签名+调用关系摘要（类似 aider RepoMap），不存完整代码
+// 完整代码通过 MCP 工具 read_file_lines / grep_code 实时读取
+func (ks *KnowledgeStore) StoreEntities(ctx context.Context, entities []entity.Entity, relations []relation.CallRelation) error {
 	if len(entities) == 0 {
 		return nil
 	}
 
-	// 1. 使用 SymbolChunker 生成代码分块
-	chunkOpts := chunker.ChunkOptions{
-		RepoPath:       ks.repoPath,
-		MaxChunkSize:   4096,
-		IncludeContext: true,
-	}
-	chunks, _ := ks.chunker.ChunkEntities(ctx, entities, chunkOpts)
-
-	// 构建分块查找表 (entity qualified_name -> chunk)
-	chunkMap := make(map[string]*chunker.CodeChunk)
-	for i := range chunks {
-		ch := &chunks[i]
-		if ch.Entity != nil {
-			chunkMap[ch.Entity.QualifiedName] = ch
-		}
-	}
-
-	// 2. 构建并存储所有图节点
+	// 1. 存储所有图节点
 	nodes := make([]graph.Node, 0, len(entities))
 	for _, e := range entities {
 		nodes = append(nodes, graph.Node{
@@ -121,61 +103,90 @@ func (ks *KnowledgeStore) StoreEntities(ctx context.Context, entities []entity.E
 		})
 	}
 
-	// 存储到图数据库
 	if ks.graphStore != nil && len(nodes) > 0 {
 		if err := ks.graphStore.AddNodes(ctx, nodes); err != nil {
 			return fmt.Errorf("存储节点失败: %w", err)
 		}
 	}
+	nodes = nil
 
-	// 3. 尝试为每个实体生成嵌入向量（批量处理）
+	// 2. 构建调用关系索引（用于 RepoMap 嵌入内容）
+	calleesMap := make(map[string][]string) // entityID -> []calleeName
+	callersMap := make(map[string][]string) // entityID -> []callerName
+
+	// 构建实体名称查找表
+	entityNames := make(map[string]string) // qualifiedName -> name
+	for _, e := range entities {
+		entityNames[e.QualifiedName] = e.Name
+	}
+
+	for _, r := range relations {
+		calleeName := r.CalleeID
+		if name, ok := entityNames[r.CalleeID]; ok {
+			calleeName = name
+		}
+		callerName := r.CallerID
+		if name, ok := entityNames[r.CallerID]; ok {
+			callerName = name
+		}
+		calleesMap[r.CallerID] = append(calleesMap[r.CallerID], calleeName)
+		callersMap[r.CalleeID] = append(callersMap[r.CalleeID], callerName)
+	}
+
+	// 去重调用关系
+	for k, v := range calleesMap {
+		calleesMap[k] = uniqueStrings(v)
+	}
+	for k, v := range callersMap {
+		callersMap[k] = uniqueStrings(v)
+	}
+
+	// 3. 生成 RepoMap 嵌入内容并存储到向量库
 	if ks.embedder == nil || ks.vectorStore == nil {
 		return nil
 	}
 
-	// 构建所有需要嵌入的内容和对应的元数据
+	const embedBatchSize = 32
+	const maxRetries = 3
+
 	type embedItem struct {
 		entity  entity.Entity
 		content string
 	}
-	var items []embedItem
 
+	// 构建所有嵌入内容（RepoMap 摘要，每个约 100-300 字节，非常轻量）
+	items := make([]embedItem, 0, len(entities))
 	for _, e := range entities {
-		var content string
-		if ch, ok := chunkMap[e.QualifiedName]; ok && ch.Content != "" {
-			content = chunker.BuildEmbeddingContent(ch)
-		} else {
-			content = fmt.Sprintf("[%s] %s\n%s\n%s",
-				string(e.Type),
-				e.QualifiedName,
-				e.Signature,
-				e.FilePath,
-			)
-		}
+		content := chunker.BuildRepoMapContent(&e, calleesMap[e.QualifiedName], callersMap[e.QualifiedName])
 		items = append(items, embedItem{entity: e, content: content})
 	}
 
-	// 分批嵌入（每批最多 32 条，避免 API 限制）
-	const batchSize = 32
-	const maxRetries = 3
-	var docs []vector.Document
+	totalSuccess := 0
 	embedFailCount := 0
 	firstError := ""
 
-	for batchStart := 0; batchStart < len(items); batchStart += batchSize {
-		batchEnd := batchStart + batchSize
-		if batchEnd > len(items) {
-			batchEnd = len(items)
+	// 分批嵌入
+	for embedStart := 0; embedStart < len(items); embedStart += embedBatchSize {
+		embedEnd := embedStart + embedBatchSize
+		if embedEnd > len(items) {
+			embedEnd = len(items)
 		}
-		batch := items[batchStart:batchEnd]
+		embedBatch := items[embedStart:embedEnd]
 
-		// 收集本批文本
-		texts := make([]string, len(batch))
-		for i, item := range batch {
+		texts := make([]string, len(embedBatch))
+		for i, item := range embedBatch {
 			texts[i] = item.content
 		}
 
+		embedIdx := embedStart/embedBatchSize + 1
+		totalBatches := (len(items) + embedBatchSize - 1) / embedBatchSize
+		ks.log.Info("嵌入中",
+			"embed_batch", fmt.Sprintf("%d/%d", embedIdx, totalBatches),
+			"progress", fmt.Sprintf("%d/%d", embedEnd, len(entities)),
+		)
+
 		// 带重试的批量嵌入
+		embedStartTime := time.Now()
 		var vectors [][]float32
 		var embedErr error
 		for retry := 0; retry < maxRetries; retry++ {
@@ -183,13 +194,15 @@ func (ks *KnowledgeStore) StoreEntities(ctx context.Context, entities []entity.E
 			if embedErr == nil {
 				break
 			}
-			ks.log.Debug("批量嵌入重试", "batch", batchStart/batchSize, "retry", retry+1, "error", embedErr)
+			ks.log.Warn("批量嵌入重试", "batch", embedIdx, "retry", retry+1, "error", embedErr)
+			time.Sleep(time.Duration(retry+1) * 2 * time.Second)
 		}
 
+		docs := make([]vector.Document, 0, len(embedBatch))
+
 		if embedErr != nil {
-			// 批量失败，回退到逐条嵌入
 			ks.log.Warn("批量嵌入失败，回退到逐条嵌入", "error", embedErr)
-			for _, item := range batch {
+			for _, item := range embedBatch {
 				vec, err := ks.embedder.Embed(ctx, item.content)
 				if err != nil {
 					embedFailCount++
@@ -200,41 +213,68 @@ func (ks *KnowledgeStore) StoreEntities(ctx context.Context, entities []entity.E
 				}
 				docs = append(docs, ks.buildVectorDoc(item.entity, item.content, vec))
 			}
-			continue
-		}
-
-		// 批量嵌入成功
-		for i, item := range batch {
-			if i < len(vectors) && vectors[i] != nil {
-				docs = append(docs, ks.buildVectorDoc(item.entity, item.content, vectors[i]))
-			} else {
-				embedFailCount++
+		} else {
+			for i, item := range embedBatch {
+				if i < len(vectors) && vectors[i] != nil {
+					docs = append(docs, ks.buildVectorDoc(item.entity, item.content, vectors[i]))
+				} else {
+					embedFailCount++
+				}
 			}
 		}
 
-		ks.log.Debug("批量嵌入完成", "batch", batchStart/batchSize+1, "size", len(batch))
+		embedDuration := time.Since(embedStartTime)
+		ks.log.Info("嵌入批次完成",
+			"embed_batch", embedIdx,
+			"success", len(docs),
+			"duration", embedDuration.Round(time.Millisecond),
+		)
+
+		if len(docs) > 0 {
+			if err := ks.vectorStore.Upsert(ctx, docs); err != nil {
+				return fmt.Errorf("存储向量失败: %w", err)
+			}
+			totalSuccess += len(docs)
+		}
 	}
+
+	// 清理
+	runtime.GC()
 
 	if embedFailCount > 0 {
 		ks.log.Warn("部分实体嵌入失败", "failed", embedFailCount, "total", len(entities), "first_error", firstError)
 	}
-	ks.log.Info("嵌入完成", "success", len(docs), "total", len(entities))
-
-	// 存储到向量数据库
-	if len(docs) > 0 {
-		if err := ks.vectorStore.Upsert(ctx, docs); err != nil {
-			return fmt.Errorf("存储向量失败: %w", err)
-		}
-	}
+	ks.log.Info("嵌入完成", "success", totalSuccess, "total", len(entities))
 
 	return nil
 }
 
+// uniqueStrings 字符串切片去重
+func uniqueStrings(s []string) []string {
+	seen := make(map[string]bool, len(s))
+	result := make([]string, 0, len(s))
+	for _, v := range s {
+		if !seen[v] {
+			seen[v] = true
+			result = append(result, v)
+		}
+	}
+	return result
+}
+
 // buildVectorDoc 构建向量文档
+// Content 只存摘要信息（减少 chromem 内存占用），完整代码通过 file_path + line 定位
 func (ks *KnowledgeStore) buildVectorDoc(e entity.Entity, content string, vec []float32) vector.Document {
+	// 构建精简的 Content：签名 + 文件位置（用于搜索结果展示）
+	summary := fmt.Sprintf("[%s] %s\nFile: %s:%d-%d",
+		string(e.Type), e.QualifiedName, e.FilePath, e.StartLine, e.EndLine)
+	if e.Signature != "" {
+		summary += "\n" + e.Signature
+	}
+
 	return vector.Document{
 		ID:      e.QualifiedName,
-		Content: content,
+		Content: summary,
 		Vector:  vec,
 		Metadata: map[string]interface{}{
 			"name":       e.Name,

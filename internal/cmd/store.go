@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"runtime"
 	"time"
 
 	"github.com/spf13/cobra"
@@ -165,7 +166,8 @@ func runStore(cmd *cobra.Command, args []string) error {
 		"methods", methodCount,
 	)
 
-	// 初始化存储层
+	// 初始化存储层（先触发 GC 释放分析阶段的中间数据）
+	runtime.GC()
 	log.Info("初始化存储层")
 
 	// 1. 创建 HuggingFace 嵌入器
@@ -228,17 +230,18 @@ func runStore(cmd *cobra.Command, args []string) error {
 		}()
 	}
 
-	// 6. 存储实体到知识库
+	// 6. 存储实体到知识库（RepoMap 模式：传入 relations 用于生成调用关系摘要）
 	log.Info("开始存储实体到知识库", "count", len(result.Entities))
-	if err := knowledgeStore.StoreEntities(ctx, result.Entities); err != nil {
+	if err := knowledgeStore.StoreEntities(ctx, result.Entities, result.Relations); err != nil {
 		return fmt.Errorf("存储实体失败: %w", err)
 	}
 	log.Info("实体存储完成")
+	result.Entities = nil // 释放实体内存
+	runtime.GC()
 
-	// 7. 存储调用关系
+	// 7. 存储调用关系到图数据库
 	if len(result.Relations) > 0 {
 		log.Info("开始存储调用关系", "count", len(result.Relations))
-		// 转换 relation.CallRelation -> store.Relation
 		storeRelations := make([]store.Relation, 0, len(result.Relations))
 		for _, r := range result.Relations {
 			storeRelations = append(storeRelations, store.Relation{
@@ -247,6 +250,7 @@ func runStore(cmd *cobra.Command, args []string) error {
 				Type:     "calls",
 			})
 		}
+		result.Relations = nil
 		if err := knowledgeStore.StoreRelations(ctx, storeRelations); err != nil {
 			log.Warn("存储调用关系失败", "error", err)
 		} else {

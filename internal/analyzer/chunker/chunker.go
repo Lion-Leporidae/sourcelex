@@ -116,14 +116,14 @@ func (c *SymbolChunker) ChunkEntities(ctx context.Context, entities []entity.Ent
 	chunks := make([]CodeChunk, 0, len(entities))
 
 	// 按文件分组实体，减少文件 IO
-	fileEntities := make(map[string][]entity.Entity)
+	fileEntities := make(map[string][]*entity.Entity)
 	for i := range entities {
 		e := &entities[i]
 		filePath := e.FilePath
 		if opts.RepoPath != "" {
 			filePath = filepath.Join(opts.RepoPath, e.FilePath)
 		}
-		fileEntities[filePath] = append(fileEntities[filePath], *e)
+		fileEntities[filePath] = append(fileEntities[filePath], e)
 	}
 
 	// 处理每个文件
@@ -142,8 +142,7 @@ func (c *SymbolChunker) ChunkEntities(ctx context.Context, entities []entity.Ent
 		}
 
 		// 为每个实体创建分块（支持大代码块切分）
-		for i := range ents {
-			e := &ents[i]
+		for _, e := range ents {
 			chunk := c.createChunk(e, lines, opts)
 			if chunk != nil {
 				subChunks := c.splitLargeChunk(chunk, lines, opts)
@@ -405,4 +404,55 @@ func BuildEmbeddingContent(chunk *CodeChunk) string {
 	parts = append(parts, chunk.Content)
 
 	return strings.Join(parts, "\n\n")
+}
+
+// CallInfo 调用关系信息（用于 RepoMap 生成）
+type CallInfo struct {
+	CallerID string
+	CalleeID string
+}
+
+// BuildRepoMapContent 构建 RepoMap 风格的嵌入文本
+// 只包含函数签名 + 文件位置 + 调用关系摘要，不包含代码内容
+// 类似 aider 的 RepoMap，用最少的文本表达代码结构
+//
+// 输出示例:
+//
+//	[function] SemanticSearch
+//	File: internal/store/knowledge.go:330-364
+//	func (ks *KnowledgeStore) SemanticSearch(ctx context.Context, query string, topK int) ([]SearchResult, error)
+//	调用→ Embed, Search
+//	被调用← handleSemanticSearch, HybridSearch
+func BuildRepoMapContent(e *entity.Entity, callees []string, callers []string) string {
+	var parts []string
+
+	// 1. 类型 + 限定名
+	parts = append(parts, fmt.Sprintf("[%s] %s", string(e.Type), e.QualifiedName))
+
+	// 2. 文件位置
+	parts = append(parts, fmt.Sprintf("File: %s:%d-%d", e.FilePath, e.StartLine, e.EndLine))
+
+	// 3. 签名
+	if e.Signature != "" {
+		parts = append(parts, e.Signature)
+	}
+
+	// 4. 文档注释
+	if e.DocComment != "" {
+		doc := strings.Trim(e.DocComment, "\"'`")
+		doc = strings.TrimSpace(doc)
+		if doc != "" {
+			parts = append(parts, doc)
+		}
+	}
+
+	// 5. 调用关系
+	if len(callees) > 0 {
+		parts = append(parts, fmt.Sprintf("调用→ %s", strings.Join(callees, ", ")))
+	}
+	if len(callers) > 0 {
+		parts = append(parts, fmt.Sprintf("被调用← %s", strings.Join(callers, ", ")))
+	}
+
+	return strings.Join(parts, "\n")
 }
