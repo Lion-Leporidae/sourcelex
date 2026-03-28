@@ -34,6 +34,7 @@ Thumbs.db
 
 # Config with secrets / 包含敏感信息的配置
 configs/config.local.yaml
+config.yaml
 
 # Debug
 __debug_bin*
