@@ -9,6 +9,10 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"os"
+	"os/exec"
+	"path/filepath"
+	"strings"
 	"sync"
 	"time"
 
@@ -102,121 +106,53 @@ type mcpToolInfo struct {
 func (s *Server) mcpToolList() []mcpToolInfo {
 	return []mcpToolInfo{
 		{
-			Name: "semantic_search", Description: "语义搜索代码实体",
+			Name:        "search",
+			Description: "在代码知识库中搜索。支持语义搜索（自然语言描述）和精确查找（entity_id）。返回实体详情（类型、文件、行号、签名）及调用关系摘要。",
 			InputSchema: map[string]interface{}{
 				"type": "object",
 				"properties": map[string]interface{}{
-					"query":     map[string]interface{}{"type": "string", "description": "搜索查询"},
+					"query":     map[string]interface{}{"type": "string", "description": "自然语言搜索查询，或实体的 QualifiedName（如 store.SemanticSearch）"},
 					"top_k":     map[string]interface{}{"type": "integer", "description": "返回数量，默认 5"},
-					"min_score": map[string]interface{}{"type": "number", "description": "最低相似度 0-1"},
 				},
 				"required": []string{"query"},
 			},
 		},
 		{
-			Name: "get_entity", Description: "获取代码实体详情",
+			Name:        "get_callchain",
+			Description: "获取代码实体的调用关系。返回紧凑文本格式的调用链（调用者 ← 实体 → 被调用者）。也可传 file 参数获取整个文件/仓库的调用图摘要。",
 			InputSchema: map[string]interface{}{
 				"type": "object",
 				"properties": map[string]interface{}{
-					"entity_id": map[string]interface{}{"type": "string", "description": "实体 QualifiedName"},
-				},
-				"required": []string{"entity_id"},
-			},
-		},
-		{
-			Name: "get_callchain", Description: "获取紧凑调用链文本（推荐：比 JSON 节省 95% token）",
-			InputSchema: map[string]interface{}{
-				"type": "object",
-				"properties": map[string]interface{}{
-					"entity_id": map[string]interface{}{"type": "string", "description": "实体 QualifiedName"},
-					"depth":     map[string]interface{}{"type": "integer", "description": "遍历深度，默认 1"},
-				},
-				"required": []string{"entity_id"},
-			},
-		},
-		{
-			Name: "get_graph_summary", Description: "获取完整调用图的紧凑文本摘要，按文件分组",
-			InputSchema: map[string]interface{}{
-				"type": "object",
-				"properties": map[string]interface{}{
-					"file": map[string]interface{}{"type": "string", "description": "可选，按文件路径过滤"},
+					"entity_id": map[string]interface{}{"type": "string", "description": "实体 QualifiedName（如 graph.NewSQLiteStore）"},
+					"file":      map[string]interface{}{"type": "string", "description": "按文件过滤调用图（传此参数时 entity_id 可省略，返回文件级调用摘要）"},
+					"depth":     map[string]interface{}{"type": "integer", "description": "遍历深度，默认 1（推荐 1-2）"},
 				},
 			},
 		},
 		{
-			Name: "get_callers", Description: "查找调用了指定函数的所有调用者",
+			Name:        "read_code",
+			Description: "读取仓库中的代码。支持按文件路径读取指定行范围，或用正则表达式搜索代码内容。",
 			InputSchema: map[string]interface{}{
 				"type": "object",
 				"properties": map[string]interface{}{
-					"entity_id": map[string]interface{}{"type": "string", "description": "实体 QualifiedName"},
-					"depth":     map[string]interface{}{"type": "integer", "description": "遍历深度，默认 2"},
+					"path":         map[string]interface{}{"type": "string", "description": "文件路径（相对于仓库根目录）"},
+					"start":        map[string]interface{}{"type": "integer", "description": "起始行号（配合 path 使用）"},
+					"end":          map[string]interface{}{"type": "integer", "description": "结束行号（配合 path 使用）"},
+					"grep":         map[string]interface{}{"type": "string", "description": "正则搜索模式（不传 path 时使用 grep 搜索整个仓库）"},
+					"file_pattern": map[string]interface{}{"type": "string", "description": "grep 时的文件名过滤（如 *.go）"},
 				},
-				"required": []string{"entity_id"},
 			},
 		},
 		{
-			Name: "get_callees", Description: "查找指定函数调用的所有被调用者",
+			Name:        "manage_repo",
+			Description: "管理代码仓库。查看已索引仓库列表、切换活跃仓库、查看工作区统计。",
 			InputSchema: map[string]interface{}{
 				"type": "object",
 				"properties": map[string]interface{}{
-					"entity_id": map[string]interface{}{"type": "string", "description": "实体 QualifiedName"},
-					"depth":     map[string]interface{}{"type": "integer", "description": "遍历深度，默认 2"},
+					"action":   map[string]interface{}{"type": "string", "description": "操作: list（列出仓库）、switch（切换仓库）、status（当前状态）", "enum": []string{"list", "switch", "status"}},
+					"repo_key": map[string]interface{}{"type": "string", "description": "仓库标识（switch 时必填），格式: repoID@branch"},
 				},
-				"required": []string{"entity_id"},
-			},
-		},
-		{
-			Name: "grep_code", Description: "在仓库中搜索代码",
-			InputSchema: map[string]interface{}{
-				"type": "object",
-				"properties": map[string]interface{}{
-					"pattern":      map[string]interface{}{"type": "string", "description": "搜索模式（正则表达式）"},
-					"file_pattern": map[string]interface{}{"type": "string", "description": "文件名过滤"},
-				},
-				"required": []string{"pattern"},
-			},
-		},
-		{
-			Name: "read_file_lines", Description: "读取文件指定行范围的代码",
-			InputSchema: map[string]interface{}{
-				"type": "object",
-				"properties": map[string]interface{}{
-					"path":  map[string]interface{}{"type": "string", "description": "文件路径"},
-					"start": map[string]interface{}{"type": "integer", "description": "起始行号"},
-					"end":   map[string]interface{}{"type": "integer", "description": "结束行号"},
-				},
-				"required": []string{"path"},
-			},
-		},
-		{
-			Name: "get_workspace", Description: "获取工作区统计信息",
-			InputSchema: map[string]interface{}{
-				"type": "object",
-				"properties": map[string]interface{}{},
-			},
-		},
-		{
-			Name: "set_active_repo", Description: "设置当前活跃仓库（所有后续搜索将基于此仓库）",
-			InputSchema: map[string]interface{}{
-				"type": "object",
-				"properties": map[string]interface{}{
-					"repo_key": map[string]interface{}{"type": "string", "description": "仓库标识，格式为 repoID@branch（如 gin@main）"},
-				},
-				"required": []string{"repo_key"},
-			},
-		},
-		{
-			Name: "list_repos", Description: "列出所有已索引的代码仓库",
-			InputSchema: map[string]interface{}{
-				"type": "object",
-				"properties": map[string]interface{}{},
-			},
-		},
-		{
-			Name: "get_active_repo", Description: "获取当前活跃仓库信息",
-			InputSchema: map[string]interface{}{
-				"type": "object",
-				"properties": map[string]interface{}{},
+				"required": []string{"action"},
 			},
 		},
 	}
@@ -370,7 +306,7 @@ func (s *Server) rpcToolsCall(ctx context.Context, req *jsonRPCRequest, sessionI
 	// 解析当前 session 的活跃仓库 store
 	activeStore := s.resolveStore(sessionID)
 
-	result, err := s.executeToolCall(ctx, activeStore, toolName, args)
+	result, err := s.executeToolCall(ctx, activeStore, toolName, args, sessionID)
 	if err != nil {
 		return &jsonRPCResponse{
 			JSONRPC: "2.0",
@@ -417,102 +353,251 @@ func (s *Server) resolveStore(sessionID string) *store.KnowledgeStore {
 	return s.store
 }
 
+// resolveRepoPath 根据 sessionID 解析活跃仓库的路径
+func (s *Server) resolveRepoPath(sessionID string) string {
+	if s.registry != nil && s.userRepoMgr != nil {
+		repoKey := s.userRepoMgr.GetActive(sessionID)
+		if rc, err := s.registry.Get(repoKey); err == nil {
+			defer rc.Release()
+			return rc.RepoPath
+		}
+	}
+	return s.repoPath
+}
+
 // executeToolCall 执行具体的工具调用
-func (s *Server) executeToolCall(ctx context.Context, ks *store.KnowledgeStore, toolName string, args map[string]interface{}) (interface{}, error) {
+func (s *Server) executeToolCall(ctx context.Context, ks *store.KnowledgeStore, toolName string, args map[string]interface{}, sessionID string) (interface{}, error) {
 	switch toolName {
-	case "semantic_search":
+
+	// ========== search: 语义搜索 + 实体查找 ==========
+	case "search", "semantic_search", "get_entity":
 		query, _ := args["query"].(string)
+		entityID, _ := args["entity_id"].(string)
+
+		// 如果 query 像是 QualifiedName（含 .），先尝试精确查找
+		if query != "" && strings.Contains(query, ".") {
+			if node, err := ks.GetEntity(ctx, query); err == nil {
+				// 精确命中，附加调用链摘要
+				chain, _ := ks.CallChainCompact(ctx, query, 1)
+				return fmt.Sprintf("[精确匹配] %s (%s)\n文件: %s:%d-%d\n签名: %s\n\n%s",
+					node.Name, string(node.Type), node.FilePath, node.StartLine, node.EndLine,
+					node.Signature, chain), nil
+			}
+		}
+		if entityID != "" {
+			if node, err := ks.GetEntity(ctx, entityID); err == nil {
+				chain, _ := ks.CallChainCompact(ctx, entityID, 1)
+				return fmt.Sprintf("[精确匹配] %s (%s)\n文件: %s:%d-%d\n签名: %s\n\n%s",
+					node.Name, string(node.Type), node.FilePath, node.StartLine, node.EndLine,
+					node.Signature, chain), nil
+			}
+		}
+
+		// 语义搜索
+		if query == "" {
+			query = entityID
+		}
+		if query == "" {
+			return nil, fmt.Errorf("query 参数必填")
+		}
 		topK := 5
 		if tk, ok := args["top_k"].(float64); ok {
 			topK = int(tk)
 		}
-		return ks.SemanticSearch(ctx, query, topK)
+		results, err := ks.SemanticSearch(ctx, query, topK)
+		if err != nil {
+			return nil, err
+		}
 
-	case "get_entity":
-		id, _ := args["entity_id"].(string)
-		return ks.GetEntity(ctx, id)
+		// 格式化为紧凑文本
+		var b strings.Builder
+		b.WriteString(fmt.Sprintf("搜索 \"%s\" 找到 %d 个结果:\n\n", query, len(results)))
+		for i, r := range results {
+			b.WriteString(fmt.Sprintf("%d. %s (%.0f%%)\n   %s\n\n", i+1, r.EntityID, r.Score*100, r.Content))
+		}
+		return b.String(), nil
 
-	case "get_callchain":
-		id, _ := args["entity_id"].(string)
+	// ========== get_callchain: 调用关系统一入口 ==========
+	case "get_callchain", "get_callers", "get_callees", "get_graph_summary":
+		entityID, _ := args["entity_id"].(string)
+		file, _ := args["file"].(string)
 		depth := 1
 		if d, ok := args["depth"].(float64); ok {
 			depth = int(d)
 		}
-		return ks.CallChainCompact(ctx, id, depth)
 
-	case "get_graph_summary":
-		file, _ := args["file"].(string)
-		return ks.CallGraphSummary(ctx, file)
-
-	case "get_callers":
-		id, _ := args["entity_id"].(string)
-		depth := 2
-		if d, ok := args["depth"].(float64); ok {
-			depth = int(d)
+		// 如果传了 file（无 entity_id），返回文件/全局调用图摘要
+		if entityID == "" || file != "" {
+			return ks.CallGraphSummary(ctx, file)
 		}
-		return ks.GetCallersOf(ctx, id, depth)
 
-	case "get_callees":
-		id, _ := args["entity_id"].(string)
-		depth := 2
-		if d, ok := args["depth"].(float64); ok {
-			depth = int(d)
+		// 否则返回实体调用链
+		return ks.CallChainCompact(ctx, entityID, depth)
+
+	// ========== read_code: 读文件 + grep ==========
+	case "read_code", "grep_code", "read_file_lines":
+		filePath, _ := args["path"].(string)
+		grepPattern, _ := args["grep"].(string)
+		filePattern, _ := args["file_pattern"].(string)
+
+		repoPath := s.resolveRepoPath(sessionID)
+		if repoPath == "" {
+			return nil, fmt.Errorf("仓库路径未配置")
 		}
-		return ks.GetCalleesOf(ctx, id, depth)
 
-	case "get_workspace":
-		return ks.Stats(ctx)
-
-	case "grep_code":
-		// 直接转发到 REST API 的逻辑
-		pattern, _ := args["pattern"].(string)
-		if pattern == "" {
-			return nil, fmt.Errorf("pattern 参数必填")
+		// grep 模式
+		if grepPattern != "" {
+			return s.doGrep(ctx, repoPath, grepPattern, filePattern)
 		}
-		return map[string]string{"info": "请使用 REST API /api/v1/grep"}, nil
 
-	case "read_file_lines":
-		path, _ := args["path"].(string)
-		if path == "" {
-			return nil, fmt.Errorf("path 参数必填")
-		}
-		return map[string]string{"info": "请使用 REST API /api/v1/file/lines?path=" + path}, nil
-
-	case "set_active_repo":
-		repoKey, _ := args["repo_key"].(string)
-		sessionIDArg, _ := args["session_id"].(string)
-		if repoKey == "" {
-			return nil, fmt.Errorf("repo_key 参数必填")
-		}
-		if s.userRepoMgr != nil {
-			sid := sessionIDArg
-			if sid == "" {
-				sid = "default"
+		// 读文件模式
+		if filePath != "" {
+			start := 1
+			end := 0
+			if v, ok := args["start"].(float64); ok {
+				start = int(v)
 			}
-			s.userRepoMgr.SetActive(sid, repoKey)
-			return map[string]string{"success": "true", "active_repo": repoKey}, nil
+			if v, ok := args["end"].(float64); ok {
+				end = int(v)
+			}
+			return s.doReadFile(repoPath, filePath, start, end)
 		}
-		return nil, fmt.Errorf("多仓库模式未启用")
 
-	case "list_repos":
-		if s.registry != nil {
-			return s.registry.List(), nil
+		// 兼容旧版 pattern 参数
+		pattern, _ := args["pattern"].(string)
+		if pattern != "" {
+			return s.doGrep(ctx, repoPath, pattern, filePattern)
 		}
-		return []interface{}{}, nil
 
-	case "get_active_repo":
-		sessionIDArg, _ := args["session_id"].(string)
-		if sessionIDArg == "" {
-			sessionIDArg = "default"
+		return nil, fmt.Errorf("需要 path（读文件）或 grep（搜索代码）参数")
+
+	// ========== manage_repo: 仓库管理 ==========
+	case "manage_repo", "list_repos", "set_active_repo", "get_active_repo", "get_workspace":
+		action, _ := args["action"].(string)
+
+		// 兼容旧工具名
+		if action == "" {
+			switch toolName {
+			case "list_repos":
+				action = "list"
+			case "set_active_repo":
+				action = "switch"
+			case "get_active_repo", "get_workspace":
+				action = "status"
+			}
 		}
-		if s.userRepoMgr != nil {
-			return map[string]string{"active_repo": s.userRepoMgr.GetActive(sessionIDArg)}, nil
+
+		switch action {
+		case "list":
+			if s.registry != nil {
+				repos := s.registry.List()
+				var b strings.Builder
+				b.WriteString(fmt.Sprintf("已索引 %d 个仓库:\n\n", len(repos)))
+				for _, r := range repos {
+					key := r.RepoID + "@" + r.Branch
+					source := r.RepoURL
+					if source == "" {
+						source = r.RepoPath
+					}
+					b.WriteString(fmt.Sprintf("  %s  (%s)  索引于 %s\n", key, source, r.IndexedAt.Format("2006-01-02 15:04")))
+				}
+				return b.String(), nil
+			}
+			return "单仓库模式，无仓库列表", nil
+
+		case "switch":
+			repoKey, _ := args["repo_key"].(string)
+			if repoKey == "" {
+				return nil, fmt.Errorf("repo_key 参数必填")
+			}
+			if s.userRepoMgr != nil {
+				if s.registry != nil {
+					if _, err := s.registry.Get(repoKey); err != nil {
+						return nil, fmt.Errorf("仓库不存在: %s", repoKey)
+					}
+				}
+				s.userRepoMgr.SetActive(sessionID, repoKey)
+				return fmt.Sprintf("已切换到仓库: %s", repoKey), nil
+			}
+			return nil, fmt.Errorf("多仓库模式未启用")
+
+		case "status":
+			var b strings.Builder
+			stats, _ := ks.Stats(ctx)
+			if stats != nil {
+				b.WriteString(fmt.Sprintf("实体: %d  调用关系: %d  向量: %d\n", stats.NodeCount, stats.EdgeCount, stats.VectorCount))
+			}
+			if s.userRepoMgr != nil {
+				b.WriteString(fmt.Sprintf("活跃仓库: %s\n", s.userRepoMgr.GetActive(sessionID)))
+			}
+			return b.String(), nil
+
+		default:
+			return nil, fmt.Errorf("未知 action: %s（可选: list, switch, status）", action)
 		}
-		return map[string]string{"active_repo": ""}, nil
 
 	default:
 		return nil, fmt.Errorf("未知工具: %s", toolName)
 	}
+}
+
+// doGrep 在仓库中执行 grep 搜索
+func (s *Server) doGrep(ctx context.Context, repoPath, pattern, filePattern string) (string, error) {
+	args := []string{"-rn", "--color=never", "-E", "-m", "30"}
+	if filePattern != "" {
+		args = append(args, "--include="+filePattern)
+	}
+	args = append(args, "--exclude-dir=.git", "--exclude-dir=node_modules", "--exclude-dir=vendor")
+	args = append(args, pattern, ".")
+
+	cmd := exec.CommandContext(ctx, "grep", args...)
+	cmd.Dir = repoPath
+	output, err := cmd.Output()
+	if err != nil {
+		if exitErr, ok := err.(*exec.ExitError); ok && exitErr.ExitCode() == 1 {
+			return "未找到匹配", nil
+		}
+		return "", fmt.Errorf("grep 执行失败: %w", err)
+	}
+
+	lines := strings.Split(strings.TrimSpace(string(output)), "\n")
+	if len(lines) > 30 {
+		lines = lines[:30]
+		lines = append(lines, fmt.Sprintf("... 截断（共 30+ 匹配）"))
+	}
+	return strings.Join(lines, "\n"), nil
+}
+
+// doReadFile 读取文件指定行
+func (s *Server) doReadFile(repoPath, filePath string, start, end int) (string, error) {
+	absPath := filepath.Join(repoPath, filePath)
+	// 安全检查
+	if !strings.HasPrefix(absPath, repoPath) {
+		return "", fmt.Errorf("无效路径")
+	}
+
+	data, err := os.ReadFile(absPath)
+	if err != nil {
+		return "", fmt.Errorf("读取文件失败: %w", err)
+	}
+
+	lines := strings.Split(string(data), "\n")
+	if start < 1 {
+		start = 1
+	}
+	if end <= 0 || end > len(lines) {
+		end = len(lines)
+	}
+	if start > len(lines) {
+		return fmt.Sprintf("文件共 %d 行，起始行 %d 超出范围", len(lines), start), nil
+	}
+
+	var b strings.Builder
+	b.WriteString(fmt.Sprintf("// %s:%d-%d (共 %d 行)\n", filePath, start, end, len(lines)))
+	for i := start - 1; i < end && i < len(lines); i++ {
+		b.WriteString(fmt.Sprintf("%4d: %s\n", i+1, lines[i]))
+	}
+	return b.String(), nil
 }
 
 // ==================== 辅助函数 ====================
