@@ -19,6 +19,7 @@ import (
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
 
+	repogit "github.com/Lion-Leporidae/sourcelex/internal/git"
 	"github.com/Lion-Leporidae/sourcelex/internal/store"
 )
 
@@ -107,33 +108,54 @@ func (s *Server) mcpToolList() []mcpToolInfo {
 	return []mcpToolInfo{
 		{
 			Name:        "search",
-			Description: "搜索代码知识库。输入自然语言或函数名，返回匹配的实体详情和调用关系。",
+			Description: "搜索代码实体（函数、类、方法）。精确名或自然语言均可。返回实体详情、签名、文件位置。",
 			InputSchema: map[string]interface{}{
 				"type": "object",
 				"properties": map[string]interface{}{
-					"query": map[string]interface{}{"type": "string", "description": "搜索内容：自然语言描述 或 函数限定名（如 store.SemanticSearch）"},
+					"query": map[string]interface{}{"type": "string", "description": "函数名（如 store.SemanticSearch）或自然语言描述（如 认证中间件）"},
 				},
 				"required": []string{"query"},
 			},
 		},
 		{
-			Name:        "read_code",
-			Description: "读取仓库中的源代码文件。",
+			Name:        "callgraph",
+			Description: "查看代码调用关系。输入函数名看其调用链，输入文件路径看文件级调用图，不传参看全局调用图。",
 			InputSchema: map[string]interface{}{
 				"type": "object",
 				"properties": map[string]interface{}{
-					"path": map[string]interface{}{"type": "string", "description": "文件路径（如 internal/mcp/server.go 或 internal/mcp/server.go:10-50）"},
+					"query": map[string]interface{}{"type": "string", "description": "函数限定名、文件路径、或留空查看全局"},
+				},
+			},
+		},
+		{
+			Name:        "read_code",
+			Description: "读取源代码文件内容。支持 file:line-line 格式指定行范围，也支持正则搜索。",
+			InputSchema: map[string]interface{}{
+				"type": "object",
+				"properties": map[string]interface{}{
+					"path": map[string]interface{}{"type": "string", "description": "文件路径（如 server.go:10-50）或正则搜索模式（如 grep:func.*Handle）"},
 				},
 				"required": []string{"path"},
 			},
 		},
 		{
-			Name:        "switch_repo",
-			Description: "切换活跃仓库。不传参数时列出所有可用仓库。",
+			Name:        "history",
+			Description: "查看 Git 历史。输入文件路径看文件变更历史，输入 commit hash 看提交详情，输入关键词搜索提交记录，输入 blame:文件路径 看逐行归属。",
 			InputSchema: map[string]interface{}{
 				"type": "object",
 				"properties": map[string]interface{}{
-					"repo": map[string]interface{}{"type": "string", "description": "仓库标识（如 gin@main）。不传则列出所有仓库。"},
+					"query": map[string]interface{}{"type": "string", "description": "文件路径、commit hash、搜索关键词、或 blame:文件路径"},
+				},
+				"required": []string{"query"},
+			},
+		},
+		{
+			Name:        "switch_repo",
+			Description: "切换活跃仓库。不传参数时列出所有可用仓库和当前状态。",
+			InputSchema: map[string]interface{}{
+				"type": "object",
+				"properties": map[string]interface{}{
+					"repo": map[string]interface{}{"type": "string", "description": "仓库标识（如 gin@main）"},
 				},
 			},
 		},
@@ -347,6 +369,18 @@ func (s *Server) resolveRepoPath(sessionID string) string {
 	return s.repoPath
 }
 
+// resolveGitRepo 根据 sessionID 解析活跃仓库的 Git 仓库
+func (s *Server) resolveGitRepo(sessionID string) *repogit.Repository {
+	if s.registry != nil && s.userRepoMgr != nil {
+		repoKey := s.userRepoMgr.GetActive(sessionID)
+		if rc, err := s.registry.Get(repoKey); err == nil {
+			defer rc.Release()
+			return rc.GitRepo
+		}
+	}
+	return s.gitRepo
+}
+
 // executeToolCall 执行工具调用
 func (s *Server) executeToolCall(ctx context.Context, ks *store.KnowledgeStore, toolName string, args map[string]interface{}, sessionID string) (interface{}, error) {
 	switch toolName {
@@ -354,11 +388,9 @@ func (s *Server) executeToolCall(ctx context.Context, ks *store.KnowledgeStore, 
 	// ========== search ==========
 	// 输入任意文本，自动尝试：精确查找 → 语义搜索
 	// 每个结果自动附带调用关系
-	case "search", "semantic_search", "get_entity", "get_callchain",
-		"get_callers", "get_callees", "get_graph_summary":
+	case "search", "semantic_search", "get_entity":
 		query, _ := args["query"].(string)
 		if query == "" {
-			// 兼容旧参数名
 			query, _ = args["entity_id"].(string)
 		}
 		if query == "" {
@@ -401,8 +433,116 @@ func (s *Server) executeToolCall(ctx context.Context, ks *store.KnowledgeStore, 
 		}
 		return b.String(), nil
 
+	// ========== callgraph ==========
+	// 输入函数名→调用链，文件路径→文件调用图，空→全局
+	case "callgraph", "get_callchain", "get_callers", "get_callees", "get_graph_summary":
+		query, _ := args["query"].(string)
+		if query == "" {
+			query, _ = args["entity_id"].(string)
+		}
+		if query == "" {
+			query, _ = args["file"].(string)
+		}
+
+		// 空 → 全局调用图
+		if query == "" {
+			return ks.CallGraphSummary(ctx, "")
+		}
+
+		// 看起来像文件路径（含 / 或 .go/.py/.js 等扩展名）→ 文件级调用图
+		if strings.Contains(query, "/") || strings.HasSuffix(query, ".go") ||
+			strings.HasSuffix(query, ".py") || strings.HasSuffix(query, ".java") ||
+			strings.HasSuffix(query, ".js") || strings.HasSuffix(query, ".ts") {
+			return ks.CallGraphSummary(ctx, query)
+		}
+
+		// 否则当作实体名 → 调用链
+		depth := 2
+		if d, ok := args["depth"].(float64); ok {
+			depth = int(d)
+		}
+		return ks.CallChainCompact(ctx, query, depth)
+
+	// ========== history ==========
+	// 文件路径→文件历史，commit hash→提交详情，blame:path→blame，其他→搜索提交
+	case "history":
+		query, _ := args["query"].(string)
+		if query == "" {
+			return nil, fmt.Errorf("query 参数必填")
+		}
+
+		gitRepo := s.resolveGitRepo(sessionID)
+		if gitRepo == nil {
+			return nil, fmt.Errorf("Git 仓库未加载，历史功能不可用")
+		}
+
+		// blame:path 格式
+		if strings.HasPrefix(query, "blame:") {
+			filePath := strings.TrimPrefix(query, "blame:")
+			result, err := gitRepo.Blame(strings.TrimSpace(filePath))
+			if err != nil {
+				return nil, err
+			}
+			var b strings.Builder
+			b.WriteString(fmt.Sprintf("Blame: %s\n\n", filePath))
+			for _, line := range result.Lines {
+				b.WriteString(fmt.Sprintf("%s %s %4d: %s\n",
+					line.Hash[:8], line.Author, line.LineNumber, line.Content))
+			}
+			return b.String(), nil
+		}
+
+		// 看起来像 commit hash（hex, 7-40 chars）
+		if len(query) >= 7 && len(query) <= 40 && isHex(query) {
+			commit, err := gitRepo.CommitDetail(query)
+			if err != nil {
+				return nil, err
+			}
+			var b strings.Builder
+			b.WriteString(fmt.Sprintf("Commit: %s\n作者: %s <%s>\n日期: %s\n消息: %s\n",
+				commit.Hash, commit.Author, commit.Email,
+				commit.Timestamp.Format("2006-01-02 15:04:05"), commit.Message))
+			if len(commit.Files) > 0 {
+				b.WriteString(fmt.Sprintf("\n变更文件 (%d):\n", len(commit.Files)))
+				for _, c := range commit.Files {
+					b.WriteString(fmt.Sprintf("  %s %s (+%d -%d)\n", c.Path, c.Path, c.Additions, c.Deletions))
+				}
+			}
+			return b.String(), nil
+		}
+
+		// 看起来像文件路径 → 文件历史
+		if strings.Contains(query, "/") || strings.Contains(query, ".") {
+			entries, err := gitRepo.FileHistory(ctx, query, 10)
+			if err != nil {
+				return nil, err
+			}
+			var b strings.Builder
+			b.WriteString(fmt.Sprintf("文件历史: %s (%d 条)\n\n", query, len(entries)))
+			for _, e := range entries {
+				b.WriteString(fmt.Sprintf("%s %s %s\n  %s\n",
+					e.Commit.Hash[:8], e.Commit.Timestamp.Format("2006-01-02"), e.Commit.Author, e.Commit.Message))
+			}
+			return b.String(), nil
+		}
+
+		// 其他 → 搜索提交记录
+		commits, err := gitRepo.Log(ctx, repogit.LogOptions{
+			Keyword:  query,
+			MaxCount: 10,
+		})
+		if err != nil {
+			return nil, err
+		}
+		var b strings.Builder
+		b.WriteString(fmt.Sprintf("搜索提交 \"%s\" (%d 条):\n\n", query, len(commits)))
+		for _, c := range commits {
+			b.WriteString(fmt.Sprintf("%s %s %s\n  %s\n",
+				c.Hash[:8], c.Timestamp.Format("2006-01-02"), c.Author, c.Message))
+		}
+		return b.String(), nil
+
 	// ========== read_code ==========
-	// 输入路径，自动读取。支持 "file.go:10-50" 格式
 	case "read_code", "grep_code", "read_file_lines":
 		pathArg, _ := args["path"].(string)
 		if pathArg == "" {
@@ -572,6 +712,16 @@ func writeSSE(w io.Writer, event, data string) {
 	if f, ok := w.(interface{ Flush() }); ok {
 		f.Flush()
 	}
+}
+
+// isHex 判断字符串是否为十六进制
+func isHex(s string) bool {
+	for _, c := range s {
+		if !((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f') || (c >= 'A' && c <= 'F')) {
+			return false
+		}
+	}
+	return true
 }
 
 // ==================== 以下保留兼容旧接口 ====================

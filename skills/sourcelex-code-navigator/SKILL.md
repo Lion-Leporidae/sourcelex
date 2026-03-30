@@ -5,37 +5,50 @@ description: "This skill should be used when the user asks about code structure,
 
 # Sourcelex Code Navigator
 
-Sourcelex indexes codebases with Tree-sitter and provides 3 simple MCP tools.
+Sourcelex indexes codebases with Tree-sitter and provides 5 MCP tools for code navigation.
 
 ## Tools
 
-### `search` — Find code
-One parameter: `query`. Works with natural language or exact function names.
-
+### `search` — Find code entities
 ```json
 { "query": "authentication middleware" }
 { "query": "store.SemanticSearch" }
 ```
+Input natural language or a qualified name. Returns entity details, file location, signature.
 
-Automatically tries exact match first, then semantic search. Results include entity details and call relationships.
-
-### `read_code` — Read source
-One parameter: `path`. Supports `file:line-line` format.
-
+### `callgraph` — View call relationships
 ```json
-{ "path": "internal/mcp/server.go" }
-{ "path": "internal/mcp/server.go:10-50" }
+{ "query": "store.SemanticSearch" }
+{ "query": "internal/mcp/handlers.go" }
+{ "query": "" }
 ```
+Input a function name for its call chain, a file path for file-level call graph, or empty for the full repo graph.
+
+### `read_code` — Read source files
+```json
+{ "path": "internal/mcp/server.go:10-50" }
+{ "path": "grep:func.*Handle" }
+```
+Input a file path (with optional :line-line range) or grep:pattern to search code.
+
+### `history` — Git history
+```json
+{ "query": "internal/mcp/server.go" }
+{ "query": "abc1234" }
+{ "query": "blame:internal/mcp/server.go" }
+{ "query": "fix auth" }
+```
+Input a file path for file history, a commit hash for details, blame:path for line attribution, or keywords to search commits.
 
 ### `switch_repo` — Switch repository
-Optional parameter: `repo`. Without it, lists all available repos.
-
 ```json
 { "repo": "gin@main" }
 { }
 ```
+Pass a repo key to switch, or omit to list all repos and current status.
 
 ## Usage
-- Most questions: one `search` call is enough
-- Need source code: `search` gives you file:line, then `read_code` to read it
+- Find code: `search` → get file:line → `read_code` to view source
+- Call chains: `callgraph` with the entity name from search results
+- Git history: `history` with file path or keywords
 - Multiple repos: `switch_repo` to change context
