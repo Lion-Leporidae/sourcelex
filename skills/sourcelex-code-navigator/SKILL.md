@@ -5,60 +5,37 @@ description: "This skill should be used when the user asks about code structure,
 
 # Sourcelex Code Navigator
 
-Sourcelex is a code knowledge graph system. It indexes repositories with Tree-sitter, extracts
-entities and cross-file call relationships, and provides semantic search via embeddings.
+Sourcelex indexes codebases with Tree-sitter and provides 3 simple MCP tools.
 
-## 4 Tools — Simple and Powerful
+## Tools
 
-### `search`
-Find code entities by natural language or exact qualified name.
+### `search` — Find code
+One parameter: `query`. Works with natural language or exact function names.
 
 ```json
 { "query": "authentication middleware" }
 { "query": "store.SemanticSearch" }
 ```
 
-If query contains `.`, it first tries exact entity lookup (returns details + call chain).
-Otherwise falls back to semantic search. Always start here.
+Automatically tries exact match first, then semantic search. Results include entity details and call relationships.
 
-### `get_callchain`
-Get call relationships for an entity, or the entire call graph for a file/repo.
+### `read_code` — Read source
+One parameter: `path`. Supports `file:line-line` format.
 
 ```json
-{ "entity_id": "store.SemanticSearch", "depth": 2 }
-{ "file": "internal/mcp/handlers.go" }
+{ "path": "internal/mcp/server.go" }
+{ "path": "internal/mcp/server.go:10-50" }
+```
+
+### `switch_repo` — Switch repository
+Optional parameter: `repo`. Without it, lists all available repos.
+
+```json
+{ "repo": "gin@main" }
 { }
 ```
 
-- With `entity_id`: returns callers and callees in compact text
-- With `file`: returns file-level call graph summary
-- With neither: returns full repo call graph
-
-### `read_code`
-Read source code or search code with grep.
-
-```json
-{ "path": "internal/mcp/server.go", "start": 1, "end": 50 }
-{ "grep": "func.*Handle", "file_pattern": "*.go" }
-```
-
-- With `path`: reads file lines (add `start`/`end` to narrow)
-- With `grep`: regex search across the repo
-
-### `manage_repo`
-Manage indexed repositories.
-
-```json
-{ "action": "list" }
-{ "action": "switch", "repo_key": "gin@main" }
-{ "action": "status" }
-```
-
-## Workflow
-
-1. User asks about code → `search` with natural language
-2. Need call chain → `get_callchain` with the entity_id from search results
-3. Need source code → `read_code` with the file_path and line numbers
-4. Switch repo → `manage_repo` with action "switch"
-
-Most questions can be answered in 1-2 tool calls.
+## Usage
+- Most questions: one `search` call is enough
+- Need source code: `search` gives you file:line, then `read_code` to read it
+- Multiple repos: `switch_repo` to change context
