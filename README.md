@@ -39,6 +39,8 @@ Sourcelex → vector search → finds authenticate(), verifyPassword(), createSe
 - **Single binary** — `go build` and you're done
 - **MCP native** — first-class integration with Cursor, Claude Desktop, and any MCP client
 - **Call graph aware** — not just text search; understands function relationships
+- **Multi-repo search** — search across all indexed repositories with a single query
+- **API boundary detection** — auto-discovers HTTP route registrations via AST analysis
 - **Incremental** — re-indexing only processes changed files
 
 ---
@@ -49,6 +51,8 @@ Sourcelex → vector search → finds authenticate(), verifyPassword(), createSe
 |---|---------|-------------|
 | **Search** | Semantic, hybrid, context-aware | Natural language → code. Vector similarity + keyword reranking |
 | **Call Graph** | Callers, callees, paths, cycles | Full bidirectional call chain traversal with configurable depth |
+| **Multi-Repo** | Cross-repository search | Search across all indexed repos simultaneously with `scope=all` |
+| **API Discovery** | HTTP route extraction | Auto-detect API endpoints from Gin, Echo, Flask, FastAPI, Express, Spring |
 | **Multi-Language** | 7 languages | Python, Go, Java, JavaScript, TypeScript, C, C++ via Tree-sitter |
 | **RAG Pipeline** | Context assembly for LLMs | Vector retrieval → graph expansion → file context → reranking → length control |
 | **MCP Protocol** | AI assistant integration | Native SSE/HTTP support for Cursor, Claude Desktop, and custom clients |
@@ -101,6 +105,29 @@ curl -X POST http://localhost:8000/api/v1/search/semantic \
 
 That's it. Your codebase is now searchable by AI.
 
+### Multi-Repo Mode
+
+Index multiple repositories and search across all of them:
+
+```bash
+# Index multiple repos
+./sourcelex store --repo https://github.com/gin-gonic/gin.git --branch master
+./sourcelex store --repo https://github.com/labstack/echo.git --branch master
+
+# Start server (auto-discovers all indexed repos)
+./sourcelex serve --port 8000
+
+# Search across all repos via MCP
+# search(query="HTTP middleware", scope="all")
+
+# Or via REST API
+curl -X POST http://localhost:8000/api/v1/search/multi \
+  -H "Content-Type: application/json" \
+  -d '{"query": "HTTP middleware"}'
+```
+
+API endpoints (route registrations) are automatically extracted during indexing for frameworks like Gin, Echo, Flask, FastAPI, Express, and Spring.
+
 ---
 
 ## How It Works
@@ -120,30 +147,30 @@ That's it. Your codebase is now searchable by AI.
                     │  Parser             │
                     └──────────┬──────────┘
                                │
-                ┌──────────────┼──────────────┐
-                │              │              │
-        ┌───────▼──────┐ ┌────▼─────┐ ┌──────▼───────┐
-        │   Entities   │ │Relations │ │    Chunks    │
-        │  func/class/ │ │ caller → │ │  code blocks │
-        │  method      │ │ callee   │ │  for embed   │
-        └───────┬──────┘ └────┬─────┘ └──────┬───────┘
-                │              │              │
-                │              │     ┌────────▼────────┐
-                │              │     │  HuggingFace    │
-                │              │     │  Embedding API  │
-                │              │     └────────┬────────┘
-                │              │              │
-         ┌──────▼──────┐ ┌────▼─────┐ ┌──────▼───────┐
-         │   SQLite    │ │  SQLite  │ │  chromem-go  │
-         │   (nodes)   │ │  (edges) │ │  (vectors)   │
-         └──────┬──────┘ └────┬─────┘ └──────┬───────┘
-                │              │              │
-                └──────────────┼──────────────┘
-                               │
-                    ┌──────────▼──────────┐
-                    │   MCP Server (Gin)  │  23 API endpoints
-                    │   REST + SSE        │  8 categories
-                    └─────────────────────┘
+            ┌──────────────┬───┴───┬──────────────┐
+            │              │       │              │
+    ┌───────▼──────┐ ┌────▼────┐ ┌▼──────────┐ ┌─▼────────────┐
+    │   Entities   │ │Relations│ │  Chunks   │ │ API Endpoints│
+    │  func/class/ │ │caller → │ │code blocks│ │ GET /api/... │
+    │  method      │ │callee   │ │for embed  │ │ POST /api/.. │
+    └───────┬──────┘ └────┬────┘ └─────┬─────┘ └──────┬───────┘
+            │              │           │               │
+            │              │  ┌────────▼────────┐      │
+            │              │  │  HuggingFace    │      │
+            │              │  │  Embedding API  │      │
+            │              │  └────────┬────────┘      │
+            │              │           │               │
+     ┌──────▼──────┐ ┌────▼────┐ ┌────▼───────┐       │
+     │   SQLite    │ │ SQLite  │ │ chromem-go │       │
+     │   (nodes)   │ │ (edges) │ │ (vectors)  │       │
+     └──────┬──────┘ └────┬────┘ └────┬───────┘       │
+            │              │          │                │
+            └──────────────┼──────────┼────────────────┘
+                           │          │
+                ┌──────────▼──────────▼──┐
+                │   MCP Server (Gin)     │  25+ API endpoints
+                │   REST + SSE           │  Multi-repo support
+                └────────────────────────┘
 ```
 
 ---
@@ -195,11 +222,18 @@ All endpoints return `{"success": bool, "data": ..., "error": "..."}`.
 | POST | `/api/v1/search/semantic` | Semantic vector search |
 | POST | `/api/v1/search/hybrid` | Vector + keyword reranking |
 | POST | `/api/v1/search/context` | Search with call graph expansion |
+| POST | `/api/v1/search/multi` | **Cross-repository search** (all indexed repos) |
 
 ```bash
+# Single-repo search
 curl -X POST http://localhost:8000/api/v1/search/semantic \
   -H "Content-Type: application/json" \
   -d '{"query": "database connection", "top_k": 5}'
+
+# Multi-repo search
+curl -X POST http://localhost:8000/api/v1/search/multi \
+  -H "Content-Type: application/json" \
+  -d '{"query": "authentication handler", "top_k": 5}'
 ```
 
 ### Call Graph
@@ -253,6 +287,14 @@ The RAG pipeline: **vector retrieval → reranking → call graph expansion → 
 | GET | `/api/v1/history/file?path=X` | File change history |
 | GET | `/api/v1/history/blame?path=X` | Line-by-line blame |
 | GET | `/api/v1/history/entity?id=X` | Entity change history |
+
+### Multi-Repo Management
+
+| Method | Endpoint | Description |
+|--------|----------|-------------|
+| GET | `/api/v1/repos` | List all indexed repositories |
+| POST | `/api/v1/repos/active` | Switch active repository |
+| GET | `/api/v1/repos/active` | Get current active repository |
 
 ### Other
 
@@ -406,14 +448,15 @@ sourcelex/
 │   ├── analyzer/              # Code analysis engine
 │   │   ├── parser/            #   Tree-sitter AST parsing
 │   │   ├── entity/            #   Entity extraction (func/class/method)
-│   │   ├── relation/          #   Call relationship extraction
+│   │   ├── relation/          #   Call relationships + API endpoint detection
 │   │   └── chunker/           #   Code chunking for embeddings
 │   ├── cmd/                   # CLI commands (Cobra)
 │   ├── config/                # Configuration (Viper)
 │   ├── git/                   # Git operations (go-git)
 │   ├── logger/                # Structured logging (Zap)
-│   ├── mcp/                   # MCP server (Gin) — 23 endpoints
+│   ├── mcp/                   # MCP server (Gin) — 25+ endpoints
 │   ├── monitor/               # Resource monitoring
+│   ├── repo/                  # Multi-repo registry + user session management
 │   ├── store/                 # Storage facade
 │   │   ├── vector/            #   chromem-go / Qdrant
 │   │   └── graph/             #   SQLite / memory
