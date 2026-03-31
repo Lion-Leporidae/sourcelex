@@ -985,6 +985,61 @@ func (s *Server) handleRAGContext(c *gin.Context) {
 	})
 }
 
+// MultiRepoRAGRequest 跨仓库 RAG 请求
+type MultiRepoRAGRequest struct {
+	Query            string   `json:"query" binding:"required"`
+	TopK             int      `json:"top_k,omitempty"`
+	RepoKeys         []string `json:"repo_keys,omitempty"`
+	IncludeCallGraph bool     `json:"include_call_graph,omitempty"`
+	CallGraphDepth   int      `json:"call_graph_depth,omitempty"`
+	EnableReranking  bool     `json:"enable_reranking,omitempty"`
+	MaxContextLength int      `json:"max_context_length,omitempty"`
+}
+
+// handleMultiRepoRAG 跨仓库 RAG 上下文组装
+// POST /api/v1/rag/multi
+func (s *Server) handleMultiRepoRAG(c *gin.Context) {
+	var req MultiRepoRAGRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, APIResponse{
+			Success: false,
+			Error:   "无效的请求参数: " + err.Error(),
+		})
+		return
+	}
+
+	if s.registry == nil {
+		c.JSON(http.StatusServiceUnavailable, APIResponse{
+			Success: false,
+			Error:   "多仓库模式未启用",
+		})
+		return
+	}
+
+	ragReq := store.RAGRequest{
+		Query:            req.Query,
+		TopK:             req.TopK,
+		IncludeCallGraph: req.IncludeCallGraph,
+		CallGraphDepth:   req.CallGraphDepth,
+		EnableReranking:  req.EnableReranking,
+		MaxContextLength: req.MaxContextLength,
+	}
+
+	result, err := s.registry.RAGAll(c.Request.Context(), ragReq, req.RepoKeys)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, APIResponse{
+			Success: false,
+			Error:   err.Error(),
+		})
+		return
+	}
+
+	c.JSON(http.StatusOK, APIResponse{
+		Success: true,
+		Data:    result,
+	})
+}
+
 // ========== 历史分析处理器 ==========
 
 // CommitInfoResponse 提交信息响应
@@ -1619,5 +1674,93 @@ func (s *Server) handleFileTree(c *gin.Context) {
 	c.JSON(http.StatusOK, APIResponse{
 		Success: true,
 		Data:    root,
+	})
+}
+
+// MultiRepoSearchRequest 跨仓库搜索请求
+type MultiRepoSearchRequest struct {
+	Query    string   `json:"query" binding:"required"`
+	TopK     int      `json:"top_k,omitempty"`
+	RepoKeys []string `json:"repo_keys,omitempty"` // 为空则搜索所有仓库
+}
+
+// MultiRepoSearchResultItem 跨仓库搜索结果项
+type MultiRepoSearchResultItem struct {
+	RepoKey  string         `json:"repo_key"`
+	RepoID   string         `json:"repo_id"`
+	Branch   string         `json:"branch"`
+	Results  []SearchResult `json:"results"`
+}
+
+// handleMultiRepoSearch 跨仓库搜索
+// POST /api/v1/search/multi
+func (s *Server) handleMultiRepoSearch(c *gin.Context) {
+	var req MultiRepoSearchRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, APIResponse{
+			Success: false,
+			Error:   "无效的请求参数: " + err.Error(),
+		})
+		return
+	}
+
+	if s.registry == nil {
+		c.JSON(http.StatusServiceUnavailable, APIResponse{
+			Success: false,
+			Error:   "多仓库模式未启用",
+		})
+		return
+	}
+
+	topK := req.TopK
+	if topK <= 0 {
+		topK = 5
+	}
+
+	multiResults, err := s.registry.SearchAll(c.Request.Context(), req.Query, topK, req.RepoKeys)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, APIResponse{
+			Success: false,
+			Error:   err.Error(),
+		})
+		return
+	}
+
+	items := make([]MultiRepoSearchResultItem, 0, len(multiResults))
+	totalCount := 0
+	for _, mr := range multiResults {
+		searchResults := make([]SearchResult, len(mr.Results))
+		for i, r := range mr.Results {
+			searchResults[i] = SearchResult{
+				EntityID: r.EntityID,
+				Score:    r.Score,
+				Metadata: r.Metadata,
+			}
+			if name, ok := r.Metadata["name"].(string); ok {
+				searchResults[i].Name = name
+			}
+			if t, ok := r.Metadata["type"].(string); ok {
+				searchResults[i].Type = t
+			}
+			if fp, ok := r.Metadata["file_path"].(string); ok {
+				searchResults[i].FilePath = fp
+			}
+			totalCount++
+		}
+		items = append(items, MultiRepoSearchResultItem{
+			RepoKey: mr.RepoKey,
+			RepoID:  mr.RepoID,
+			Branch:  mr.Branch,
+			Results: searchResults,
+		})
+	}
+
+	c.JSON(http.StatusOK, APIResponse{
+		Success: true,
+		Data: gin.H{
+			"repos":       items,
+			"repo_count":  len(items),
+			"total_count": totalCount,
+		},
 	})
 }

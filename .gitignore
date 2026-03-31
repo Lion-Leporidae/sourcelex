@@ -42,3 +42,4 @@ __debug_bin*
 /.agent/*
 /configs/config.yaml
 sourcelex
+.sourcelex_cache.json

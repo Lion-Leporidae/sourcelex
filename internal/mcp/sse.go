@@ -108,11 +108,12 @@ func (s *Server) mcpToolList() []mcpToolInfo {
 	return []mcpToolInfo{
 		{
 			Name:        "search",
-			Description: "搜索代码实体（函数、类、方法）。精确名或自然语言均可。返回实体详情、签名、文件位置。",
+			Description: "搜索代码实体（函数、类、方法）。精确名或自然语言均可。返回实体详情、签名、文件位置。支持跨仓库搜索。",
 			InputSchema: map[string]interface{}{
 				"type": "object",
 				"properties": map[string]interface{}{
 					"query": map[string]interface{}{"type": "string", "description": "函数名（如 store.SemanticSearch）或自然语言描述（如 认证中间件）"},
+					"scope": map[string]interface{}{"type": "string", "description": "搜索范围：留空=当前仓库，all=所有仓库，或逗号分隔的仓库列表（如 gin@main,echo@main）"},
 				},
 				"required": []string{"query"},
 			},
@@ -157,6 +158,18 @@ func (s *Server) mcpToolList() []mcpToolInfo {
 				"properties": map[string]interface{}{
 					"repo": map[string]interface{}{"type": "string", "description": "仓库标识（如 gin@main）"},
 				},
+			},
+		},
+		{
+			Name:        "context",
+			Description: "为 LLM 组装跨仓库代码上下文（RAG）。从所有仓库中检索相关代码并自动附带调用关系。适合需要理解多个仓库间关联的复杂问题。",
+			InputSchema: map[string]interface{}{
+				"type": "object",
+				"properties": map[string]interface{}{
+					"query": map[string]interface{}{"type": "string", "description": "问题或关键词（如 用户认证的完整流程）"},
+					"scope": map[string]interface{}{"type": "string", "description": "搜索范围：留空=当前仓库，all=所有仓库，或逗号分隔的仓库列表"},
+				},
+				"required": []string{"query"},
 			},
 		},
 	}
@@ -388,6 +401,7 @@ func (s *Server) executeToolCall(ctx context.Context, ks *store.KnowledgeStore, 
 	// ========== search ==========
 	// 输入任意文本，自动尝试：精确查找 → 语义搜索
 	// 每个结果自动附带调用关系
+	// scope 参数: 留空=当前仓库, all=所有仓库, 逗号分隔=指定仓库列表
 	case "search", "semantic_search", "get_entity":
 		query, _ := args["query"].(string)
 		if query == "" {
@@ -396,11 +410,15 @@ func (s *Server) executeToolCall(ctx context.Context, ks *store.KnowledgeStore, 
 		if query == "" {
 			query, _ = args["file"].(string)
 			if query != "" {
-				// file 参数 → 返回文件级调用图
 				return ks.CallGraphSummary(ctx, query)
 			}
-			// 无参数 → 全局调用图
 			return ks.CallGraphSummary(ctx, "")
+		}
+
+		// 检查是否为跨仓库搜索
+		scope, _ := args["scope"].(string)
+		if scope != "" && s.registry != nil {
+			return s.executeMultiRepoSearch(ctx, query, scope, sessionID)
 		}
 
 		// 1) 先尝试精确查找实体
@@ -568,6 +586,57 @@ func (s *Server) executeToolCall(ctx context.Context, ks *store.KnowledgeStore, 
 		filePath, start, end := parsePath(pathArg)
 		return s.doReadFile(repoPath, filePath, start, end)
 
+	// ========== context ==========
+	// 跨仓库 RAG 上下文组装
+	case "context", "rag_context", "multi_rag":
+		query, _ := args["query"].(string)
+		if query == "" {
+			return nil, fmt.Errorf("query 参数必填")
+		}
+
+		scope, _ := args["scope"].(string)
+
+		// 无 scope 或单仓库模式 → 用当前仓库的 RAG
+		if scope == "" || s.registry == nil {
+			resp, err := ks.RAGPipeline(ctx, store.RAGRequest{
+				Query:            query,
+				TopK:             5,
+				IncludeCallGraph: true,
+				CallGraphDepth:   2,
+				IncludeFileContext: true,
+				EnableReranking:  true,
+				MaxContextLength: 16000,
+			})
+			if err != nil {
+				return nil, err
+			}
+			return resp.Context, nil
+		}
+
+		// 跨仓库 RAG
+		var repoKeys []string
+		if scope != "all" {
+			for _, key := range strings.Split(scope, ",") {
+				key = strings.TrimSpace(key)
+				if key != "" {
+					repoKeys = append(repoKeys, key)
+				}
+			}
+		}
+
+		multiResp, err := s.registry.RAGAll(ctx, store.RAGRequest{
+			Query:            query,
+			TopK:             5,
+			IncludeCallGraph: true,
+			CallGraphDepth:   1,
+			EnableReranking:  true,
+			MaxContextLength: 16000,
+		}, repoKeys)
+		if err != nil {
+			return nil, err
+		}
+		return multiResp.Context, nil
+
 	// ========== switch_repo ==========
 	// 传 repo → 切换；不传 → 列出所有 + 当前状态
 	case "switch_repo", "manage_repo", "list_repos", "set_active_repo",
@@ -722,6 +791,63 @@ func isHex(s string) bool {
 		}
 	}
 	return true
+}
+
+// executeMultiRepoSearch 跨仓库联合搜索
+// scope: "all" 搜索所有仓库，或逗号分隔的仓库列表如 "gin@main,echo@main"
+func (s *Server) executeMultiRepoSearch(ctx context.Context, query, scope, sessionID string) (interface{}, error) {
+	if s.registry == nil {
+		return nil, fmt.Errorf("多仓库模式未启用")
+	}
+
+	var repoKeys []string
+	if scope != "all" {
+		for _, key := range strings.Split(scope, ",") {
+			key = strings.TrimSpace(key)
+			if key != "" {
+				repoKeys = append(repoKeys, key)
+			}
+		}
+	}
+
+	multiResults, err := s.registry.SearchAll(ctx, query, 5, repoKeys)
+	if err != nil {
+		return nil, err
+	}
+
+	if len(multiResults) == 0 {
+		return "未在任何仓库中找到匹配的代码实体", nil
+	}
+
+	var b strings.Builder
+	b.WriteString(fmt.Sprintf("# 跨仓库搜索: \"%s\"\n\n", query))
+
+	totalResults := 0
+	for _, mr := range multiResults {
+		if len(mr.Results) == 0 {
+			continue
+		}
+		b.WriteString(fmt.Sprintf("## 仓库: %s\n", mr.RepoKey))
+		for i, r := range mr.Results {
+			b.WriteString(fmt.Sprintf("  %d. %s (%.0f%%)\n     %s\n", i+1, r.EntityID, r.Score*100, r.Content))
+			totalResults++
+		}
+		b.WriteString("\n")
+	}
+
+	if totalResults == 0 {
+		return "未在任何仓库中找到匹配的代码实体", nil
+	}
+
+	b.WriteString(fmt.Sprintf("共 %d 个仓库, %d 条结果\n", len(multiResults), totalResults))
+
+	// 标注当前活跃仓库
+	if s.userRepoMgr != nil {
+		active := s.userRepoMgr.GetActive(sessionID)
+		b.WriteString(fmt.Sprintf("当前活跃仓库: %s（使用 switch_repo 可切换到其他仓库查看详情）\n", active))
+	}
+
+	return b.String(), nil
 }
 
 // ==================== 以下保留兼容旧接口 ====================
