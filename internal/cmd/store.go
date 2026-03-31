@@ -23,11 +23,22 @@ import (
 
 // RepoMetadata 仓库元数据，持久化到数据目录供 serve 命令使用
 type RepoMetadata struct {
-	RepoID    string    `json:"repo_id"`
-	RepoPath  string    `json:"repo_path"`
-	RepoURL   string    `json:"repo_url,omitempty"`
-	Branch    string    `json:"branch,omitempty"`
-	IndexedAt time.Time `json:"indexed_at"`
+	RepoID       string                   `json:"repo_id"`
+	RepoPath     string                   `json:"repo_path"`
+	RepoURL      string                   `json:"repo_url,omitempty"`
+	Branch       string                   `json:"branch,omitempty"`
+	IndexedAt    time.Time                `json:"indexed_at"`
+	APIEndpoints []APIEndpointMeta        `json:"api_endpoints,omitempty"`
+}
+
+// APIEndpointMeta API 端点元数据（持久化格式）
+type APIEndpointMeta struct {
+	Method    string `json:"method"`
+	Path      string `json:"path"`
+	HandlerID string `json:"handler_id,omitempty"`
+	Framework string `json:"framework,omitempty"`
+	File      string `json:"file"`
+	Line      int    `json:"line"`
 }
 
 // deriveRepoID 从仓库 URL 或路径派生一个短 ID 用作子目录名
@@ -189,6 +200,14 @@ func runStore(cmd *cobra.Command, args []string) error {
 		"methods", methodCount,
 	)
 
+	// 显示 API 端点摘要
+	if len(result.APIEndpoints) > 0 {
+		log.Info("API 端点统计", "total", len(result.APIEndpoints))
+		for _, ep := range result.APIEndpoints {
+			log.Debug("API 端点", "method", ep.Method, "path", ep.Path, "handler", ep.HandlerID, "file", ep.File)
+		}
+	}
+
 	// 初始化存储层（先触发 GC 释放分析阶段的中间数据）
 	runtime.GC()
 	log.Info("初始化存储层")
@@ -316,6 +335,17 @@ func runStore(cmd *cobra.Command, args []string) error {
 		RepoURL:   repoURL,
 		Branch:    repoBranch,
 		IndexedAt: time.Now(),
+	}
+	// 将 API 端点写入元数据
+	for _, ep := range result.APIEndpoints {
+		meta.APIEndpoints = append(meta.APIEndpoints, APIEndpointMeta{
+			Method:    ep.Method,
+			Path:      ep.Path,
+			HandlerID: ep.HandlerID,
+			Framework: ep.Framework,
+			File:      ep.File,
+			Line:      ep.Line,
+		})
 	}
 	metaPath := filepath.Join(repoDataDir, "metadata.json")
 	metaData, err := json.MarshalIndent(meta, "", "  ")

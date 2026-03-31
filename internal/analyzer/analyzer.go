@@ -26,7 +26,8 @@ type Analyzer struct {
 type AnalysisResult struct {
 	RepoPath      string
 	Entities      []entity.Entity
-	Relations     []relation.CallRelation // 调用关系
+	Relations     []relation.CallRelation  // 调用关系
+	APIEndpoints  []relation.APIEndpoint   // API 端点（路由注册）
 	FileCount     int
 	EntityCount   int
 	RelationCount int
@@ -87,12 +88,13 @@ func (a *Analyzer) BuildIndex(ctx context.Context) (*AnalysisResult, error) {
 		return nil, err
 	}
 
-	// 步骤8: 第二遍解析：提取 import + 调用关系（需要第一遍的实体构建符号表）
-	relations := a.extractRelations(ctx, filesToAnalyze, entities)
+	// 步骤8: 第二遍解析：提取 import + 调用关系 + API 端点（需要第一遍的实体构建符号表）
+	relations, apiEndpoints := a.extractRelationsAndAPIs(ctx, filesToAnalyze, entities)
 
 	a.log.Info("索引构建完成",
 		"entities", len(entities),
 		"relations", len(relations),
+		"api_endpoints", len(apiEndpoints),
 		"files_analyzed", len(filesToAnalyze),
 	)
 
@@ -100,6 +102,7 @@ func (a *Analyzer) BuildIndex(ctx context.Context) (*AnalysisResult, error) {
 		RepoPath:      a.scanner.repoPath,
 		Entities:      entities,
 		Relations:     relations,
+		APIEndpoints:  apiEndpoints,
 		FileCount:     scanResult.TotalFiles,
 		EntityCount:   len(entities),
 		RelationCount: len(relations),
@@ -167,9 +170,9 @@ func (a *Analyzer) analyzeFiles(ctx context.Context, files []string) ([]entity.E
 	return entities, nil
 }
 
-// extractRelations 提取调用关系
-// 先构建符号表 + 提取 import 信息，然后遍历文件提取调用关系
-func (a *Analyzer) extractRelations(ctx context.Context, files []string, entities []entity.Entity) []relation.CallRelation {
+// extractRelationsAndAPIs 提取调用关系和 API 端点
+// 先构建符号表 + 提取 import 信息，然后遍历文件提取调用关系和 API 路由注册
+func (a *Analyzer) extractRelationsAndAPIs(ctx context.Context, files []string, entities []entity.Entity) ([]relation.CallRelation, []relation.APIEndpoint) {
 	// 1. 从实体构建符号表
 	symbolTable := relation.BuildSymbolTableFromEntities(entities)
 	a.log.Debug("符号表构建完成", "symbols", symbolTable.Size())
@@ -191,11 +194,12 @@ func (a *Analyzer) extractRelations(ctx context.Context, files []string, entitie
 	}
 	a.log.Debug("import 信息提取完成")
 
-	// 3. 第二轮：并行提取调用关系（符号表已包含 import 信息，解析更准确）
+	// 3. 第二轮：并行提取调用关系 + API 端点（符号表已包含 import 信息，解析更准确）
 	var (
-		wg        sync.WaitGroup
-		mu        sync.Mutex
-		relations []relation.CallRelation
+		wg           sync.WaitGroup
+		mu           sync.Mutex
+		relations    []relation.CallRelation
+		apiEndpoints []relation.APIEndpoint
 	)
 
 	jobs := make(chan string, len(files))
@@ -227,20 +231,30 @@ func (a *Analyzer) extractRelations(ctx context.Context, files []string, entitie
 				}
 
 				extractor := relation.NewExtractor(result.Content, relPath, lang, symbolTable)
+
+				// 提取调用关系
 				fileRelations := extractor.Extract(result.Tree)
+
+				// 提取 API 端点（复用同一个 extractor，不需要重新解析）
+				fileEndpoints := extractor.ExtractAPIEndpoints(result.Tree)
+
 				result.Tree.Close()
 
+				mu.Lock()
 				if len(fileRelations) > 0 {
-					mu.Lock()
 					relations = append(relations, fileRelations...)
-					mu.Unlock()
 					a.log.Debug("提取调用关系", "file", relPath, "relations", len(fileRelations))
 				}
+				if len(fileEndpoints) > 0 {
+					apiEndpoints = append(apiEndpoints, fileEndpoints...)
+					a.log.Info("发现 API 端点", "file", relPath, "endpoints", len(fileEndpoints))
+				}
+				mu.Unlock()
 			}
 		}()
 	}
 
 	wg.Wait()
-	a.log.Info("调用关系提取完成", "total_relations", len(relations))
-	return relations
+	a.log.Info("调用关系提取完成", "total_relations", len(relations), "total_api_endpoints", len(apiEndpoints))
+	return relations, apiEndpoints
 }

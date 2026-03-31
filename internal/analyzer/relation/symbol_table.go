@@ -188,6 +188,19 @@ func (st *SymbolTable) Size() int {
 	return len(st.globalSymbols)
 }
 
+// GetImports 获取指定文件的所有导入映射 {alias → module}
+func (st *SymbolTable) GetImports(filePath string) map[string]string {
+	st.mu.RLock()
+	defer st.mu.RUnlock()
+	result := make(map[string]string)
+	if fileImports, ok := st.imports[filePath]; ok {
+		for k, v := range fileImports {
+			result[k] = v
+		}
+	}
+	return result
+}
+
 // ResolveResult 解析结果（含置信度）
 type ResolveResult struct {
 	QualifiedName string
